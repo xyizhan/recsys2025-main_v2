@@ -81,7 +81,7 @@ def train_encoder(
             batch = {k: v.to(device) for k, v in batch.items()}
             v1, v2 = augment_views(batch)
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast(device_type="cuda", enabled=use_amp):
                 z1 = model(v1)
                 z2 = model(v2)
                 loss = info_nce_loss(z1, z2, temperature=temperature)
