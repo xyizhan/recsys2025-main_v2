@@ -120,18 +120,43 @@ def train_encoder(
         )
 
 
-def generate_embeddings(model: EventEncoder, device: torch.device, client_groups, relevant_client_ids: np.ndarray, batch_size: int, max_seq_len: int, embedding_dim: int) -> tuple[np.ndarray, np.ndarray]:
+def generate_embeddings(
+    model: EventEncoder,
+    device: torch.device,
+    client_groups,
+    relevant_client_ids: np.ndarray,
+    batch_size: int,
+    max_seq_len: int,
+    embedding_dim: int,
+    log_interval: int,
+) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     client_ids = relevant_client_ids.astype(np.int64)
     embeddings = np.zeros((client_ids.shape[0], embedding_dim), dtype=np.float16)
+    total = client_ids.shape[0]
+    steps = max(1, math.ceil(total / batch_size))
+    log_interval = max(1, log_interval)
+    start_time = time.time()
     with torch.no_grad():
-        for i in range(0, client_ids.shape[0], batch_size):
+        for step_idx, i in enumerate(range(0, client_ids.shape[0], batch_size)):
             batch_ids = client_ids[i : i + batch_size]
             seqs = [client_groups.get(int(cid), None) for cid in batch_ids]
             batch = collate_sequences(seqs, max_len=max_seq_len)
             batch = {k: v.to(device) for k, v in batch.items()}
             z = model(batch)
             embeddings[i : i + batch_ids.shape[0]] = z.detach().cpu().numpy().astype(np.float16)
+            if (step_idx + 1) % log_interval == 0 or (step_idx + 1) == steps:
+                processed = min(i + batch_ids.shape[0], total)
+                elapsed = time.time() - start_time
+                rate = processed / max(1e-6, elapsed)
+                logger.info(
+                    "embedding gen %d/%d | %d/%d samples | %.1f samples/s",
+                    step_idx + 1,
+                    steps,
+                    processed,
+                    total,
+                    rate,
+                )
     return client_ids, embeddings
 
 
@@ -218,6 +243,7 @@ def main(params):
         batch_size=params.batch_size,
         max_seq_len=params.max_seq_len,
         embedding_dim=params.embedding_dim,
+        log_interval=params.log_interval,
     )
 
     logger.info("Saving embeddings and client_ids to %s", str(embeddings_dir))
