@@ -27,18 +27,36 @@ TYPE_TO_ID = {
 
 
 def _parse_query(q: str) -> np.ndarray:
-    q = q.strip().replace("[", "").replace("]", "")
-    if q == "":
+    # Robust parser: handle NaN/non-bracket strings, pad/crop to 16
+    if q is None:
         return np.zeros(16, dtype=np.float32)
-    arr = np.array([int(s) for s in q.split(" ") if s != ""], dtype=np.float32)
-    if arr.size != 16:
-        # pad or crop to 16
-        if arr.size < 16:
-            arr = np.pad(arr, (0, 16 - arr.size))
-        else:
-            arr = arr[:16]
-    # scale integers (0..255) to 0..1
-    return arr / 255.0
+    qs = str(q).strip()
+    if qs == "" or qs.lower() == "nan":
+        return np.zeros(16, dtype=np.float32)
+    # remove brackets and commas if any
+    qs = qs.replace("[", "").replace("]", "").replace(",", " ")
+    tokens = [tok for tok in qs.split() if tok != ""]
+    vals: List[float] = []
+    for tok in tokens:
+        try:
+            # tolerate float tokens; cast to int bucket range later
+            v = float(tok)
+            if np.isfinite(v):
+                vals.append(v)
+        except Exception:
+            continue
+    if len(vals) == 0:
+        return np.zeros(16, dtype=np.float32)
+    arr = np.array(vals, dtype=np.float32)
+    # normalize typical 0..255 integers to 0..1
+    if arr.max() > 1.0:
+        arr = arr / 255.0
+    # pad/crop to length 16
+    if arr.size < 16:
+        arr = np.pad(arr, (0, 16 - arr.size))
+    else:
+        arr = arr[:16]
+    return arr
 
 
 def load_events_df(data_dir: DataDir) -> Dict[str, pd.DataFrame]:
@@ -82,12 +100,20 @@ def collate_sequences(batch_seqs: List[pd.DataFrame], max_len: int) -> Dict[str,
         L = min(df.shape[0], max_len)
         # take most recent max_len
         sub = df.iloc[-L:]
-        type_ids[i, :L] = torch.tensor([TYPE_TO_ID.get(t, 2) for t in sub["event_type"].tolist()], dtype=torch.long)
+        et_list = sub["event_type"].tolist()
+        type_ids[i, :L] = torch.tensor([TYPE_TO_ID.get(t, 2) for t in et_list], dtype=torch.long)
         # NaN -> 0 index (will hash to some bucket)
         for name, target in [("sku", sku_ids), ("category", cat_ids), ("price", price_ids), ("url", url_ids)]:
             vals = sub[name].fillna(0).astype(np.int64).to_numpy()
             target[i, :L] = torch.tensor(vals, dtype=torch.long)
-        qmat = np.stack([_parse_query(q) for q in sub["query"].astype(str).tolist()], axis=0) if "query" in sub.columns else np.zeros((L, 16), dtype=np.float32)
+        # parse query only for search_query rows; else zeros
+        q_rows: List[np.ndarray] = []
+        for t, q in zip(et_list, sub["query"].tolist() if "query" in sub.columns else [None] * L):
+            if t == "search_query" and q is not None and str(q).lower() != "nan":
+                q_rows.append(_parse_query(str(q)))
+            else:
+                q_rows.append(np.zeros(16, dtype=np.float32))
+        qmat = np.stack(q_rows, axis=0) if len(q_rows) > 0 else np.zeros((L, 16), dtype=np.float32)
         query_vec[i, :L, :] = torch.tensor(qmat, dtype=torch.float32)
     return {
         "type_ids": type_ids,
