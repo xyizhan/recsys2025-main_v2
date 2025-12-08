@@ -36,6 +36,7 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--train-client-frac", type=float, default=1.0, help="Fraction of clients to use for contrastive training")
     p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     p.add_argument("--no-amp", action="store_true", help="Disable automatic mixed precision training")
+    p.add_argument("--device", type=str, default="auto", help="Device to run training on: e.g. 'cuda:0', 'cpu', or 'auto'")
     return p
 
 
@@ -50,6 +51,7 @@ def train_encoder(
     lr: float,
     log_interval: int,
     use_amp: bool,
+    amp_device_type: str,
 ):
     ids = list(client_groups.keys())
     if len(ids) == 0:
@@ -81,7 +83,7 @@ def train_encoder(
             batch = {k: v.to(device) for k, v in batch.items()}
             v1, v2 = augment_views(batch)
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+            with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
                 z1 = model(v1)
                 z2 = model(v2)
                 loss = info_nce_loss(z1, z2, temperature=temperature)
@@ -168,7 +170,15 @@ def main(params):
                 100 * len(train_groups) / max(1, len(client_groups)),
             )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device_arg = params.device.lower()
+    if device_arg == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(device_arg)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(f"CUDA device requested ({params.device}) but torch.cuda.is_available() is False")
+    if device.type == "cuda" and device.index is not None:
+        torch.cuda.set_device(device)
     model = EventEncoder(
         d_model=params.d_model,
         embed_dim=params.embedding_dim,
@@ -178,8 +188,11 @@ def main(params):
         ffn_mult=params.ffn_mult,
     )
     model.to(device)
-    use_amp = torch.cuda.is_available() and not params.no_amp
+    use_amp = device.type == "cuda" and not params.no_amp
     logger.info("Using device=%s (AMP=%s)", device, use_amp)
+    if device.type == "cuda":
+        dev_index = device.index if device.index is not None else torch.cuda.current_device()
+        logger.info("CUDA device name: %s", torch.cuda.get_device_name(dev_index))
 
     logger.info("Training encoder with contrastive InfoNCE...")
     train_encoder(
@@ -193,6 +206,7 @@ def main(params):
         lr=params.lr,
         log_interval=params.log_interval,
         use_amp=use_amp,
+        amp_device_type="cuda" if device.type == "cuda" else "cpu",
     )
 
     logger.info("Generating embeddings for relevant clients...")
