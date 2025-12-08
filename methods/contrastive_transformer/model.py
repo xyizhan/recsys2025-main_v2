@@ -30,6 +30,8 @@ class EventEncoder(nn.Module):
         url_buckets: int = 65536,
         price_buckets: int = 128,
         type_buckets: int = 8,
+        dropout: float = 0.1,
+        ffn_mult: float = 2.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -44,7 +46,15 @@ class EventEncoder(nn.Module):
         # special tokens
         self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.pos = PositionalEncoding(d_model=d_model)
-        enc_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 4, batch_first=True)
+        dim_ff = max(d_model, int(d_model * ffn_mult))
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=dim_ff,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
         # projection head (SimCLR style)
         self.proj = nn.Sequential(
@@ -52,6 +62,7 @@ class EventEncoder(nn.Module):
         )
         self.gelu = nn.GELU()
         self.ln = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
 
     def _hash(self, ids: torch.Tensor, buckets: int) -> torch.Tensor:
         return (ids % buckets).clamp(min=0)
@@ -92,7 +103,7 @@ class EventEncoder(nn.Module):
         B = x.size(0)
         cls = self.cls.expand(B, -1, -1)
         x = torch.cat([cls, x], dim=1)
-        x = self.pos(x)
+        x = self.dropout(self.pos(x))
         x = self.encoder(x)
         # take CLS token
         h = x[:, 0, :]
