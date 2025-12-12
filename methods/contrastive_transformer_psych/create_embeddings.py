@@ -60,6 +60,11 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--psych-recon-weight", type=float, default=0.5)
     p.add_argument("--psych-kl-weight", type=float, default=0.1)
     p.add_argument("--hierarchy-weight", type=float, default=0.05)
+    p.add_argument("--enable-mask-predict", action="store_true", help="Enable masked event prediction auxiliary loss")
+    p.add_argument("--mask-loss-weight", type=float, default=0.5, help="Weight for masked event prediction loss")
+    p.add_argument("--mask-prob", type=float, default=0.15, help="Probability of masking event types for auxiliary task")
+    p.add_argument("--enable-order-predict", action="store_true", help="Enable sequence order prediction auxiliary loss")
+    p.add_argument("--order-loss-weight", type=float, default=0.5, help="Weight for order prediction loss")
     return p
 
 
@@ -77,6 +82,50 @@ def build_recon_target(type_ids: torch.Tensor) -> torch.Tensor:
     hist_sum = hist.sum(dim=1, keepdim=True)
     hist = torch.where(hist_sum > 0, hist / hist_sum.clamp(min=1e-6), torch.zeros_like(hist))
     return hist
+
+
+def _clone_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {k: v.clone() for k, v in batch.items()}
+
+
+def build_mask_prediction_batch(batch: dict[str, torch.Tensor], mask_prob: float) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    mask_prob = float(max(0.0, min(1.0, mask_prob)))
+    masked = _clone_batch(batch)
+    type_ids = masked["type_ids"]
+    device = type_ids.device
+    mask_labels = torch.full_like(type_ids, fill_value=-100)
+    if mask_prob == 0.0:
+        return masked, mask_labels
+    rand = torch.rand(type_ids.shape, device=device)
+    mask_positions = rand < mask_prob
+    mask_labels[mask_positions] = type_ids[mask_positions]
+    mask_token = TYPE_TO_ID["MASK"]
+    masked["type_ids"] = torch.where(
+        mask_positions,
+        torch.full_like(type_ids, mask_token),
+        type_ids,
+    )
+    return masked, mask_labels
+
+
+def build_order_prediction_batch(batch: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    ordered = _clone_batch(batch)
+    type_ids = ordered["type_ids"]
+    device = type_ids.device
+    B, L = type_ids.shape
+    labels = torch.zeros(B, dtype=torch.long, device=device)
+    if L <= 1:
+        return ordered, labels
+    flip_mask = torch.rand(B, device=device) < 0.5
+    if flip_mask.any():
+        rev_idx = torch.arange(L - 1, -1, -1, device=device)
+        for key, tensor in ordered.items():
+            if tensor.dim() == 3:
+                ordered[key][flip_mask] = tensor[flip_mask][:, rev_idx, :]
+            else:
+                ordered[key][flip_mask] = tensor[flip_mask][:, rev_idx]
+        labels[flip_mask] = 1
+    return ordered, labels
 
 
 def train_encoder(
@@ -97,6 +146,11 @@ def train_encoder(
     psych_recon_weight: float,
     psych_kl_weight: float,
     hierarchy_weight: float,
+    enable_mask_predict: bool,
+    mask_loss_weight: float,
+    mask_prob: float,
+    enable_order_predict: bool,
+    order_loss_weight: float,
 ):
     ids = list(client_groups.keys())
     if len(ids) == 0:
@@ -125,6 +179,10 @@ def train_encoder(
             "p_kl": 0.0,
             "hierarchy": 0.0,
         }
+        if enable_mask_predict:
+            metrics["mask"] = 0.0
+        if enable_order_predict:
+            metrics["order"] = 0.0
         samples_processed = 0
         for step_idx in range(steps_per_epoch):
             start = step_idx * batch_size
@@ -157,6 +215,22 @@ def train_encoder(
                     + MaslowPsychologicalVAE.kl_divergence(out2["psych_mu"], out2["psych_logvar"])
                 )
                 hierarchy = 0.5 * (out1["hierarchy_loss"] + out2["hierarchy_loss"])
+                mask_loss = torch.zeros(1, device=device)
+                if enable_mask_predict:
+                    masked_batch, mask_labels = build_mask_prediction_batch(batch, mask_prob)
+                    mask_logits = model.predict_mask_logits(masked_batch)
+                    vocab = mask_logits.size(-1)
+                    loss_inputs = mask_logits.reshape(-1, vocab)
+                    loss_targets = mask_labels.reshape(-1)
+                    if (loss_targets != -100).any():
+                        mask_loss = F.cross_entropy(loss_inputs, loss_targets, ignore_index=-100)
+                    else:
+                        mask_loss = torch.zeros(1, device=device)
+                order_loss = torch.zeros(1, device=device)
+                if enable_order_predict:
+                    order_batch, order_labels = build_order_prediction_batch(batch)
+                    order_logits = model.classify_order(order_batch)
+                    order_loss = F.cross_entropy(order_logits, order_labels)
                 loss = (
                     contrastive_weight * ctr_loss
                     + behavior_recon_weight * behavior_recon
@@ -165,6 +239,10 @@ def train_encoder(
                     + psych_kl_weight * psych_kl
                     + hierarchy_weight * hierarchy
                 )
+                if enable_mask_predict:
+                    loss = loss + mask_loss_weight * mask_loss
+                if enable_order_predict:
+                    loss = loss + order_loss_weight * order_loss
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -178,16 +256,20 @@ def train_encoder(
             metrics["p_recon"] += float(psych_recon.detach().cpu())
             metrics["p_kl"] += float(psych_kl.detach().cpu())
             metrics["hierarchy"] += float(hierarchy.detach().cpu())
+            if enable_mask_predict:
+                metrics["mask"] += float(mask_loss.detach().cpu())
+            if enable_order_predict:
+                metrics["order"] += float(order_loss.detach().cpu())
 
             if (step_idx + 1) % log_interval == 0 or (step_idx + 1) == steps_per_epoch:
                 elapsed = time.time() - epoch_start
                 avg_step = elapsed / (step_idx + 1)
                 eta = avg_step * (steps_per_epoch - (step_idx + 1))
-                logger.info(
-                    (
-                        "epoch %d/%d | step %d/%d | loss=%.4f | ctr=%.4f | b_recon=%.4f | "
-                        "p_recon=%.4f | b_kl=%.4f | p_kl=%.4f | hier=%.4f | eta=%.1fs"
-                    ),
+                msg = (
+                    "epoch %d/%d | step %d/%d | loss=%.4f | ctr=%.4f | b_recon=%.4f | "
+                    "p_recon=%.4f | b_kl=%.4f | p_kl=%.4f | hier=%.4f"
+                )
+                values = [
                     ep + 1,
                     epochs,
                     step_idx + 1,
@@ -199,10 +281,18 @@ def train_encoder(
                     float(behavior_kl.detach().cpu()),
                     float(psych_kl.detach().cpu()),
                     float(hierarchy.detach().cpu()),
-                    max(0.0, eta),
-                )
+                ]
+                if enable_mask_predict:
+                    msg += " | mask=%.4f"
+                    values.append(float(mask_loss.detach().cpu()))
+                if enable_order_predict:
+                    msg += " | order=%.4f"
+                    values.append(float(order_loss.detach().cpu()))
+                msg += " | eta=%.1fs"
+                values.append(max(0.0, eta))
+                logger.info(msg, *values)
         logger.info(
-            "finished epoch %d/%d in %.1fs | loss=%.4f | ctr=%.4f | b_recon=%.4f | p_recon=%.4f | b_kl=%.4f | p_kl=%.4f | hier=%.4f",
+            "finished epoch %d/%d in %.1fs | loss=%.4f | ctr=%.4f | b_recon=%.4f | p_recon=%.4f | b_kl=%.4f | p_kl=%.4f | hier=%.4f%s%s",
             ep + 1,
             epochs,
             time.time() - epoch_start,
@@ -213,6 +303,8 @@ def train_encoder(
             metrics["b_kl"] / steps_per_epoch,
             metrics["p_kl"] / steps_per_epoch,
             metrics["hierarchy"] / steps_per_epoch,
+            f" | mask={metrics['mask'] / steps_per_epoch:.4f}" if enable_mask_predict else "",
+            f" | order={metrics['order'] / steps_per_epoch:.4f}" if enable_order_predict else "",
         )
 
 
@@ -340,6 +432,11 @@ def main(params):
         psych_recon_weight=params.psych_recon_weight,
         psych_kl_weight=params.psych_kl_weight,
         hierarchy_weight=params.hierarchy_weight,
+        enable_mask_predict=params.enable_mask_predict,
+        mask_loss_weight=params.mask_loss_weight,
+        mask_prob=params.mask_prob,
+        enable_order_predict=params.enable_order_predict,
+        order_loss_weight=params.order_loss_weight,
     )
 
     logger.info("Generating embeddings for relevant clients...")
