@@ -22,5 +22,10 @@ nohup python -m methods.contrastive_transformer_psych.create_embeddings \
   --psych-recon-weight 0.5 \
   --psych-kl-weight 0.1 \
   --hierarchy-weight 0.05 \
+  --enable-mask-predict \
+  --mask-loss-weight 0.5 \
+  --mask-prob 0.15 \
+  --enable-order-predict \
+  --order-loss-weight 0.5 \
   > "$log_file" 2>&1 &
 echo "Launched contrastive+Psych dual-VAE embedding job. Logs: $log_file"
