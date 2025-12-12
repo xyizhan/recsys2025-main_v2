@@ -1,0 +1,22 @@
+{
+    "model_name": "contrastive_transformer_handcraft",
+    "description": "基于心理学模型的对比学习+手工特征",
+    
+    "use_handcrafted": true,
+    "handcrafted_dir": "./handcrafted_features",
+    
+    "embedding_dim": 128,
+    "hidden_size": 256,
+    "num_layers": 3,
+    "num_heads": 8,
+    
+    "vae_latent_dim": 64,
+    "dropout_rate": 0.1,
+    
+    "contrastive_weight": 1.0,
+    "recon_weight": 0.5,
+    "kl_weight": 0.01,
+    
+    "maslow_levels": 5,
+    "psych_dim": 32
+}

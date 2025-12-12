@@ -1,0 +1,28 @@
+INFO:__main__:Loading input events...
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/methods/contrastive_transformer_handcraft/create_embeddings.py", line 398, in <module>
+    main(parser.parse_args())
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/methods/contrastive_transformer_handcraft/create_embeddings.py", line 300, in main
+    dfs = load_events_df(data_dir=data_dir)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/methods/contrastive_transformer/data.py", line 65, in load_events_df
+    df = load_with_properties(data_dir=data_dir, event_type=et)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/data_utils/utils.py", line 36, in load_with_properties
+    event_df = pd.read_parquet(data_dir.input_dir / f"{event_type}.parquet")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.11/site-packages/pandas/io/parquet.py", line 670, in read_parquet
+    return impl.read(
+           ^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.11/site-packages/pandas/io/parquet.py", line 265, in read
+    path_or_handle, handles, filesystem = _get_path_or_handle(
+                                          ^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.11/site-packages/pandas/io/parquet.py", line 139, in _get_path_or_handle
+    handles = get_handle(
+              ^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.11/site-packages/pandas/io/common.py", line 872, in get_handle
+    handle = open(handle, ioargs.mode)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '../autodl-tmp/recsys_new/input/product_buy.parquet'

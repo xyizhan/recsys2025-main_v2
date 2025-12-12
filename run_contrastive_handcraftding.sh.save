@@ -1,0 +1,1 @@
+nohup python -m methods.contrastive_handcraft_embedding.creabash run_contrastive_hanbash run_contrastive_handcraft_embedding.sh

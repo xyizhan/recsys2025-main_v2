@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/methods/contrastive_transformer_handcraft/create_embeddings.py", line 398, in <module>
+    main(parser.parse_args())
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/methods/contrastive_transformer_handcraft/create_embeddings.py", line 283, in main
+    data_dir = DataDir(Path(params.data_dir))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/data_utils/data_dir.py", line 31, in __init__
+    self._validate_data_dir()
+  File "/Users/yunxi/Documents/THU/Deep_Learning/dl_grouphw/recsys2025-main_v2/data_utils/data_dir.py", line 82, in _validate_data_dir
+    raise ChallengeDataDirectoryError(
+data_utils.data_dir.ChallengeDataDirectoryError: The product_properties.parquet file missing in ../autodl-tmp/recsys_new
