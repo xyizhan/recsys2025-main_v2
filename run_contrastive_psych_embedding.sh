@@ -6,7 +6,7 @@ mkdir -p "$log_dir"
 log_file="$log_dir/contrastive_psych_${timestamp}.log"
 nohup python -m methods.contrastive_transformer_psych.create_embeddings \
   --data-dir ../autodl-tmp/recsys_new \
-  --embeddings-dir ../autodl-tmp/embeddings_out/contrastive_transformer_psych_v1 \
+  --embeddings-dir ../autodl-tmp/embeddings_out/contrastive_transformer_psych_v2_mask_order \
   --epochs 1 \
   --batch-size 512 \
   --embedding-dim 512 \
@@ -22,5 +22,10 @@ nohup python -m methods.contrastive_transformer_psych.create_embeddings \
   --psych-recon-weight 0.5 \
   --psych-kl-weight 0.1 \
   --hierarchy-weight 0.05 \
+  --enable-mask-predict \
+  --mask-loss-weight 0.5 \
+  --mask-prob 0.15 \
+  --enable-order-predict \
+  --order-loss-weight 0.5 \
   > "$log_file" 2>&1 &
 echo "Launched contrastive+Psych dual-VAE embedding job. Logs: $log_file"

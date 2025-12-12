@@ -89,7 +89,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--score-dir",
         required=False,
         type=str,
-        help="Path to directory where to save best scores for each task",
+        help="Directory where to save best scores for each task; if the provided path does not exist, it will be created",
     )
     parser.add_argument(
         "--disable-relevant-clients-check",
@@ -140,6 +140,8 @@ def main(params) -> None:
     data_dir = DataDir(data_dir=Path(params.data_dir))
     task_constructor = TaskConstructor(data_dir=data_dir)
     score_dir = Path(params.score_dir) if params.score_dir else None
+    if score_dir:
+        score_dir.mkdir(parents=True, exist_ok=True)
 
     run_tasks(
         train_logging_config=train_logging_config,

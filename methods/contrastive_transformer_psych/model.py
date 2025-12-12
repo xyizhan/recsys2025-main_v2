@@ -167,11 +167,19 @@ class DualPsychVAETransformer(nn.Module):
             hidden_dim=max(256, d_model),
         )
         self.psych_to_embed = nn.Linear(psych_latent_dim, embed_dim)
+        # Optional self-supervision heads
+        self.mask_predictor = nn.Linear(d_model, type_buckets)
+        order_hidden = max(64, d_model // 2)
+        self.order_classifier = nn.Sequential(
+            nn.Linear(d_model, order_hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(order_hidden, 2),
+        )
 
     def _hash(self, ids: torch.Tensor, buckets: int) -> torch.Tensor:
         return (ids % buckets).clamp(min=0)
 
-    def encode_events(self, batch) -> torch.Tensor:
+    def encode_events(self, batch, return_sequence: bool = False) -> torch.Tensor:
         x = self.emb_type(self._hash(batch["type_ids"], self.emb_type.num_embeddings))
         if "sku_ids" in batch:
             x = x + self.emb_sku(self._hash(batch["sku_ids"], self.emb_sku.num_embeddings))
@@ -189,6 +197,8 @@ class DualPsychVAETransformer(nn.Module):
         x = torch.cat([cls, x], dim=1)
         x = self.dropout(self.pos(x))
         x = self.encoder(x)
+        if return_sequence:
+            return x
         return x[:, 0, :]
 
     def forward(self, batch, sample_latent: bool = True) -> dict[str, torch.Tensor]:
@@ -226,3 +236,12 @@ class DualPsychVAETransformer(nn.Module):
     @staticmethod
     def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         return -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
+
+    def predict_mask_logits(self, batch) -> torch.Tensor:
+        seq = self.encode_events(batch, return_sequence=True)
+        tokens = seq[:, 1:, :]
+        return self.mask_predictor(tokens)
+
+    def classify_order(self, batch) -> torch.Tensor:
+        h = self.encode_events(batch, return_sequence=False)
+        return self.order_classifier(h)
