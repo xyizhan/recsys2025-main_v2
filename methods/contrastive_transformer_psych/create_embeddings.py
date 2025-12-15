@@ -10,16 +10,17 @@ import torch.nn.functional as F
 from torch import optim
 
 from data_utils.data_dir import DataDir
-from methods.contrastive_transformer.data import (
+from methods.contrastive_transformer_psych.data import (
     EVENT_TYPES,
     TYPE_TO_ID,
     augment_views,
     build_client_sequences,
     collate_sequences,
     load_events_df,
+    STATS_DIM
 )
 from methods.contrastive_transformer.model import info_nce_loss
-from methods.contrastive_transformer_psych.model import DualPsychVAETransformer, MaslowPsychologicalVAE
+from methods.contrastive_transformer_psych.model import DualPsychVAETransformer, MaslowPsychologicalVAE, HierarchicalPsychVAE
 
 
 logging.basicConfig()
@@ -60,11 +61,15 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--psych-recon-weight", type=float, default=0.5)
     p.add_argument("--psych-kl-weight", type=float, default=0.1)
     p.add_argument("--hierarchy-weight", type=float, default=0.05)
+
     p.add_argument("--enable-mask-predict", action="store_true", help="Enable masked event prediction auxiliary loss")
-    p.add_argument("--mask-loss-weight", type=float, default=0.5, help="Weight for masked event prediction loss")
+    p.add_argument("--mask-loss-weight", type=float, default=0.2, help="Weight for masked event prediction loss")
     p.add_argument("--mask-prob", type=float, default=0.15, help="Probability of masking event types for auxiliary task")
     p.add_argument("--enable-order-predict", action="store_true", help="Enable sequence order prediction auxiliary loss")
-    p.add_argument("--order-loss-weight", type=float, default=0.5, help="Weight for order prediction loss")
+    p.add_argument("--order-loss-weight", type=float, default=0.2, help="Weight for order prediction loss")
+
+    p.add_argument("--stats-version", type=str, default='concat')
+    p.add_argument("--stats-dim", type=int, default=STATS_DIM)
     return p
 
 
@@ -116,6 +121,7 @@ def build_order_prediction_batch(batch: dict[str, torch.Tensor]) -> tuple[dict[s
     labels = torch.zeros(B, dtype=torch.long, device=device)
     if L <= 1:
         return ordered, labels
+
     flip_mask = torch.rand(B, device=device) < 0.5
     if flip_mask.any():
         rev_idx = torch.arange(L - 1, -1, -1, device=device)
@@ -125,6 +131,48 @@ def build_order_prediction_batch(batch: dict[str, torch.Tensor]) -> tuple[dict[s
             else:
                 ordered[key][flip_mask] = tensor[flip_mask][:, rev_idx]
         labels[flip_mask] = 1
+    return ordered, labels
+
+
+def build_order_prediction_batch_v2(batch: dict[str, torch.Tensor]) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    ordered = _clone_batch(batch)
+    type_ids = ordered["type_ids"]
+    device = type_ids.device
+    B, L = type_ids.shape
+    labels = torch.zeros(B, dtype=torch.long, device=device)
+    if L <= 3:
+        return ordered, labels
+    
+    # 30%负样本
+    perturb_mask = torch.rand(B, device=device) < 0.3
+    for b in range(B):
+        if perturb_mask[b] and L > 3:
+            labels[b] = 1
+            
+            # 随机交换相邻位置 模拟用户犹豫
+            if torch.rand(1) < 0.5:
+                swap_pos = torch.randint(0, L-1, (1,)).item()
+                for key, tensor in ordered.items():
+                    if tensor.dim() == 2:
+                        temp = tensor[b, swap_pos].clone()
+                        tensor[b, swap_pos] = tensor[b, swap_pos+1]
+                        tensor[b, swap_pos+1] = temp
+                    elif tensor.dim() == 3:
+                        temp = tensor[b, swap_pos].clone()
+                        tensor[b, swap_pos] = tensor[b, swap_pos+1]
+                        tensor[b, swap_pos+1] = temp
+            
+            # 打乱中间片段 模拟跳转
+            else:
+                start = torch.randint(1, L-3, (1,)).item()
+                end = torch.randint(start+2, L, (1,)).item()
+                indices = torch.randperm(end-start) + start
+                for key, tensor in ordered.items():
+                    if tensor.dim() == 2:
+                        tensor[b, start:end] = tensor[b, indices]
+                    elif tensor.dim() == 3:
+                        tensor[b, start:end] = tensor[b, indices]
+    
     return ordered, labels
 
 
@@ -405,6 +453,8 @@ def main(params):
         fusion_behavior=params.fusion_behavior,
         fusion_psych=params.fusion_psych,
         recon_dim=len(EVENT_TYPES),
+        stats_dim=params.stats_dim,
+        stats_version=params.stats_version
     )
     model.to(device)
     use_amp = device.type == "cuda" and not params.no_amp
