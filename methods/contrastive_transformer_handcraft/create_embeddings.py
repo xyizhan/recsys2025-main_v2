@@ -6,92 +6,52 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import optim
 
 from data_utils.data_dir import DataDir
-from methods.contrastive_transformer.data import (
-    EVENT_TYPES,
-    TYPE_TO_ID,
-    augment_views,
-    build_client_sequences,
-    collate_sequences,
-    load_events_df,
-)
-from methods.contrastive_transformer.model import info_nce_loss
-
-from methods.contrastive_transformer_handcraft.model import DualPsychVAETransformer, MaslowPsychologicalVAE
-
+from methods.contrastive_transformer_handcraft.model import EventEncoder, info_nce_loss
+from methods.contrastive_transformer_handcraft.data import load_events_df, build_client_sequences, collate_sequences, augment_views
+from methods.contrastive_transformer_handcraft.handcrafted_features import HandcraftedFeatureLoader
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)
 
 
-EVENT_TYPE_IDS = torch.tensor([TYPE_TO_ID[e] for e in EVENT_TYPES], dtype=torch.long)
-
-
 def get_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
-    p.add_argument("--data-dir", type=str, required=True, help="Directory with split_data output")
-    p.add_argument("--embeddings-dir", type=str, required=True, help="Output directory for embeddings.npy and client_ids.npy")
+    p.add_argument("--data-dir", type=str, required=True, help="Directory with input/target data (split_data output)")
+    p.add_argument("--embeddings-dir", type=str, required=True, help="Directory to save embeddings.npy and client_ids.npy")
     p.add_argument("--embedding-dim", type=int, default=512)
     p.add_argument("--d-model", type=int, default=256)
     p.add_argument("--n-layers", type=int, default=4)
     p.add_argument("--n-heads", type=int, default=8)
-    p.add_argument("--behavioral-latent-dim", type=int, default=128)
-    p.add_argument("--psych-latent-dim", type=int, default=160)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--max-seq-len", type=int, default=256)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--temperature", type=float, default=0.2)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--ffn-mult", type=float, default=2.0)
-    p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--fusion-behavior", type=float, default=0.5)
-    p.add_argument("--fusion-psych", type=float, default=0.5)
-    p.add_argument("--log-interval", type=int, default=10)
-    p.add_argument("--train-client-frac", type=float, default=1.0)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--no-amp", action="store_true")
-    p.add_argument("--device", type=str, default="auto")
-    p.add_argument("--contrastive-weight", type=float, default=1.0)
-    p.add_argument("--behavior-recon-weight", type=float, default=1.0)
-    p.add_argument("--behavior-kl-weight", type=float, default=0.1)
-    p.add_argument("--psych-recon-weight", type=float, default=0.5)
-    p.add_argument("--psych-kl-weight", type=float, default=0.1)
-    p.add_argument("--hierarchy-weight", type=float, default=0.05)
+    p.add_argument("--ffn-mult", type=float, default=2.0, help="Feedforward multiplier relative to d_model for transformer layers")
+    p.add_argument("--dropout", type=float, default=0.1, help="Dropout used in the transformer encoder")
+    p.add_argument("--log-interval", type=int, default=10, help="Number of steps between progress logs")
+    p.add_argument("--train-client-frac", type=float, default=1.0, help="Fraction of clients to use for contrastive training")
+    p.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    p.add_argument("--no-amp", action="store_true", help="Disable automatic mixed precision training")
+    p.add_argument("--device", type=str, default="auto", help="Device to run training on: e.g. 'cuda:0', 'cpu', or 'auto'")
     
-    # 添加手工特征相关的参数
-    p.add_argument("--use-handcrafted", action="store_true", default=True, 
+    # 新增手工特征相关参数
+    p.add_argument("--use-handcrafted-features", action="store_true", 
                    help="Whether to use handcrafted features")
-    p.add_argument("--handcrafted-dir", type=str, default="./handcrafted_features",
+    p.add_argument("--handcrafted-feature-dir", type=str, default="./handcrafted_features",
                    help="Directory containing handcrafted features")
-    p.add_argument("--handcrafted-fusion-method", type=str, default="concat",
-                   choices=["concat", "add", "weighted"],
-                   help="Method to fuse handcrafted features")
+    p.add_argument("--user-feat-dim", type=int, default=64, help="Dimension of user handcrafted features")
+    p.add_argument("--product-feat-dim", type=int, default=32, help="Dimension of product handcrafted features")
     
     return p
 
 
-def build_recon_target(type_ids: torch.Tensor) -> torch.Tensor:
-    """Return normalized histogram over real event types (excludes MASK/CLS)."""
-    device = type_ids.device
-    type_ids = type_ids.clamp(min=0)
-    num_classes = max(TYPE_TO_ID.values()) + 1
-    one_hot = F.one_hot(type_ids, num_classes=num_classes).float()
-    mask = (type_ids >= 2).float().unsqueeze(-1)
-    one_hot = one_hot * mask
-    hist = one_hot.sum(dim=1)
-    cols = EVENT_TYPE_IDS.to(device)
-    hist = hist.index_select(dim=1, index=cols)
-    hist_sum = hist.sum(dim=1, keepdim=True)
-    hist = torch.where(hist_sum > 0, hist / hist_sum.clamp(min=1e-6), torch.zeros_like(hist))
-    return hist
-
-
 def train_encoder(
-    model: DualPsychVAETransformer,
+    model: EventEncoder,
     device: torch.device,
     client_groups,
     batch_size: int,
@@ -102,141 +62,97 @@ def train_encoder(
     log_interval: int,
     use_amp: bool,
     amp_device_type: str,
-    contrastive_weight: float,
-    behavior_recon_weight: float,
-    behavior_kl_weight: float,
-    psych_recon_weight: float,
-    psych_kl_weight: float,
-    hierarchy_weight: float,
+    feature_loader: HandcraftedFeatureLoader = None,
+    use_handcrafted_features: bool = False,
 ):
+    """训练编码器，支持手工特征"""
     ids = list(client_groups.keys())
     if len(ids) == 0:
         logger.warning("No clients available for training. Skipping fit phase.")
         return
+        
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     log_interval = max(1, log_interval)
     steps_per_epoch = max(1, math.ceil(len(ids) / batch_size))
+    
     logger.info(
-        "Training on %d clients (%d steps/epoch, batch_size=%d)",
+        "Training on %d clients (%d steps/epoch, batch_size=%d, handcrafted_features=%s)",
         len(ids),
         steps_per_epoch,
         batch_size,
+        use_handcrafted_features,
     )
 
+    model.train()
     for ep in range(epochs):
         np.random.shuffle(ids)
+        total_loss = 0.0
         epoch_start = time.time()
-        metrics = {
-            "loss": 0.0,
-            "ctr": 0.0,
-            "b_recon": 0.0,
-            "b_kl": 0.0,
-            "p_recon": 0.0,
-            "p_kl": 0.0,
-            "hierarchy": 0.0,
-        }
         samples_processed = 0
+        
         for step_idx in range(steps_per_epoch):
+            iter_start = time.time()
             start = step_idx * batch_size
             batch_ids = ids[start : start + batch_size]
             seqs = [client_groups[cid] for cid in batch_ids]
-            batch = collate_sequences(seqs, max_len=max_seq_len)
             
-            # 添加客户端ID到batch中，用于手工特征查找
-            batch["client_id"] = torch.tensor(batch_ids, dtype=torch.long)
+            # 加载批次数据，包含手工特征
+            batch = collate_sequences(seqs, max_len=max_seq_len, feature_loader=feature_loader)
+            batch = {k: v.to(device) for k, v in batch.items()}
             
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-            recon_target = build_recon_target(batch["type_ids"])
+            # 提取手工特征
+            user_features = batch.get("user_features")
+            product_features = batch.get("product_features")
+            
+            # 数据增强
             v1, v2 = augment_views(batch)
-
+            
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
-                # 确保两个视图都包含客户端ID
-                v1["client_id"] = batch["client_id"]
-                v2["client_id"] = batch["client_id"]
+                # 前向传播，传入手工特征
+                z1 = model(v1, user_features=user_features, product_features=product_features)
+                z2 = model(v2, user_features=user_features, product_features=product_features)
+                loss = info_nce_loss(z1, z2, temperature=temperature)
                 
-                out1 = model(v1, sample_latent=True)
-                out2 = model(v2, sample_latent=True)
-                ctr_loss = info_nce_loss(out1["embed"], out2["embed"], temperature=temperature)
-                behavior_recon = 0.5 * (
-                    F.mse_loss(out1["behavior_recon"], recon_target)
-                    + F.mse_loss(out2["behavior_recon"], recon_target)
-                )
-                behavior_kl = 0.5 * (
-                    DualPsychVAETransformer.kl_divergence(out1["behavior_mu"], out1["behavior_logvar"])
-                    + DualPsychVAETransformer.kl_divergence(out2["behavior_mu"], out2["behavior_logvar"])
-                )
-                psych_recon = 0.5 * (
-                    F.mse_loss(out1["psych_recon"], out1["sequence_hidden"].detach())
-                    + F.mse_loss(out2["psych_recon"], out2["sequence_hidden"].detach())
-                )
-                psych_kl = 0.5 * (
-                    MaslowPsychologicalVAE.kl_divergence(out1["psych_mu"], out1["psych_logvar"])
-                    + MaslowPsychologicalVAE.kl_divergence(out2["psych_mu"], out2["psych_logvar"])
-                )
-                hierarchy = 0.5 * (out1["hierarchy_loss"] + out2["hierarchy_loss"])
-                loss = (
-                    contrastive_weight * ctr_loss
-                    + behavior_recon_weight * behavior_recon
-                    + behavior_kl_weight * behavior_kl
-                    + psych_recon_weight * psych_recon
-                    + psych_kl_weight * psych_kl
-                    + hierarchy_weight * hierarchy
-                )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-
+            
+            step_loss = float(loss.detach().cpu())
+            total_loss += step_loss
             batch_clients = batch["type_ids"].size(0)
             samples_processed += batch_clients
-            metrics["loss"] += float(loss.detach().cpu())
-            metrics["ctr"] += float(ctr_loss.detach().cpu())
-            metrics["b_recon"] += float(behavior_recon.detach().cpu())
-            metrics["b_kl"] += float(behavior_kl.detach().cpu())
-            metrics["p_recon"] += float(psych_recon.detach().cpu())
-            metrics["p_kl"] += float(psych_kl.detach().cpu())
-            metrics["hierarchy"] += float(hierarchy.detach().cpu())
-
+            
             if (step_idx + 1) % log_interval == 0 or (step_idx + 1) == steps_per_epoch:
                 elapsed = time.time() - epoch_start
-                avg_step = elapsed / (step_idx + 1)
-                eta = avg_step * (steps_per_epoch - (step_idx + 1))
+                avg_step_time = elapsed / (step_idx + 1)
+                eta = avg_step_time * (steps_per_epoch - (step_idx + 1))
+                samples_per_sec = samples_processed / max(1e-6, elapsed)
                 logger.info(
-                    (
-                        "epoch %d/%d | step %d/%d | loss=%.4f | ctr=%.4f | b_recon=%.4f | "
-                        "p_recon=%.4f | b_kl=%.4f | p_kl=%.4f | hier=%.4f | eta=%.1fs"
-                    ),
+                    "epoch %d/%d | step %d/%d | loss=%.4f | elapsed=%.1fs | eta=%.1fs | %.1f samples/s",
                     ep + 1,
                     epochs,
                     step_idx + 1,
                     steps_per_epoch,
-                    float(loss.detach().cpu()),
-                    float(ctr_loss.detach().cpu()),
-                    float(behavior_recon.detach().cpu()),
-                    float(psych_recon.detach().cpu()),
-                    float(behavior_kl.detach().cpu()),
-                    float(psych_kl.detach().cpu()),
-                    float(hierarchy.detach().cpu()),
+                    step_loss,
+                    elapsed,
                     max(0.0, eta),
+                    samples_per_sec,
                 )
+                
+        avg_loss = total_loss / steps_per_epoch
         logger.info(
-            "finished epoch %d/%d in %.1fs | loss=%.4f | ctr=%.4f | b_recon=%.4f | p_recon=%.4f | b_kl=%.4f | p_kl=%.4f | hier=%.4f",
+            "finished epoch %d/%d in %.1fs | avg_loss=%.4f",
             ep + 1,
             epochs,
             time.time() - epoch_start,
-            metrics["loss"] / steps_per_epoch,
-            metrics["ctr"] / steps_per_epoch,
-            metrics["b_recon"] / steps_per_epoch,
-            metrics["p_recon"] / steps_per_epoch,
-            metrics["b_kl"] / steps_per_epoch,
-            metrics["p_kl"] / steps_per_epoch,
-            metrics["hierarchy"] / steps_per_epoch,
+            avg_loss,
         )
 
 
 def generate_embeddings(
-    model: DualPsychVAETransformer,
+    model: EventEncoder,
     device: torch.device,
     client_groups,
     relevant_client_ids: np.ndarray,
@@ -244,7 +160,10 @@ def generate_embeddings(
     max_seq_len: int,
     embedding_dim: int,
     log_interval: int,
-):
+    feature_loader: HandcraftedFeatureLoader = None,
+    use_handcrafted_features: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """生成嵌入向量，支持手工特征"""
     model.eval()
     client_ids = relevant_client_ids.astype(np.int64)
     embeddings = np.zeros((client_ids.shape[0], embedding_dim), dtype=np.float16)
@@ -252,18 +171,24 @@ def generate_embeddings(
     steps = max(1, math.ceil(total / batch_size))
     log_interval = max(1, log_interval)
     start_time = time.time()
+    
     with torch.no_grad():
         for step_idx, i in enumerate(range(0, client_ids.shape[0], batch_size)):
             batch_ids = client_ids[i : i + batch_size]
-            seqs = [client_groups.get(int(cid)) for cid in batch_ids]
-            batch = collate_sequences(seqs, max_len=max_seq_len)
+            seqs = [client_groups.get(int(cid), None) for cid in batch_ids]
             
-            # 添加客户端ID到batch中，用于手工特征查找
-            batch["client_id"] = torch.tensor(batch_ids, dtype=torch.long)
+            # 加载批次数据，包含手工特征
+            batch = collate_sequences(seqs, max_len=max_seq_len, feature_loader=feature_loader)
+            batch = {k: v.to(device) for k, v in batch.items()}
             
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-            out = model(batch, sample_latent=False)
-            embeddings[i : i + batch_ids.shape[0]] = out["embed"].detach().cpu().numpy().astype(np.float16)
+            # 提取手工特征
+            user_features = batch.get("user_features")
+            product_features = batch.get("product_features")
+            
+            # 前向传播，传入手工特征
+            z = model(batch, user_features=user_features, product_features=product_features)
+            embeddings[i : i + batch_ids.shape[0]] = z.detach().cpu().numpy().astype(np.float16)
+            
             if (step_idx + 1) % log_interval == 0 or (step_idx + 1) == steps:
                 processed = min(i + batch_ids.shape[0], total)
                 elapsed = time.time() - start_time
@@ -276,6 +201,7 @@ def generate_embeddings(
                     total,
                     rate,
                 )
+                    
     return client_ids, embeddings
 
 
@@ -284,6 +210,7 @@ def main(params):
     embeddings_dir = Path(params.embeddings_dir)
     embeddings_dir.mkdir(parents=True, exist_ok=True)
 
+    # 设置随机种子
     np.random.seed(params.seed)
     torch.manual_seed(params.seed)
     if torch.cuda.is_available():
@@ -295,11 +222,29 @@ def main(params):
     except AttributeError:
         pass
 
+    # 加载手工特征（如果启用）
+    feature_loader = None
+    if params.use_handcrafted_features:
+        logger.info("Loading handcrafted features from %s", params.handcrafted_feature_dir)
+        try:
+            feature_loader = HandcraftedFeatureLoader(feature_dir=params.handcrafted_feature_dir)
+            feature_loader.load_features()
+            user_dim, product_dim = feature_loader.get_feature_dimensions()
+            logger.info("Handcrafted features loaded successfully (user_dim=%d, product_dim=%d)", user_dim, product_dim)
+        except Exception as e:
+            logger.warning("Failed to load handcrafted features: %s. Continuing without handcrafted features.", str(e))
+            params.use_handcrafted_features = False
+            feature_loader = None
+    else:
+        logger.info("Handcrafted features disabled")
+
+    # 加载数据
     relevant_client_ids = np.load(data_dir.input_dir / "relevant_clients.npy")
     logger.info("Loading input events...")
     dfs = load_events_df(data_dir=data_dir)
     logger.info("Building client sequences...")
     client_groups = build_client_sequences(dfs=dfs, relevant_client_ids=relevant_client_ids)
+    
     train_groups = client_groups
     if 0 < params.train_client_frac < 1.0 and len(client_groups) > 0:
         rng = np.random.default_rng(params.seed)
@@ -314,6 +259,7 @@ def main(params):
                 100 * len(train_groups) / max(1, len(client_groups)),
             )
 
+    # 设备设置
     device_arg = params.device.lower()
     if device_arg == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -324,38 +270,27 @@ def main(params):
     if device.type == "cuda" and device.index is not None:
         torch.cuda.set_device(device)
 
-    # 初始化模型，添加手工特征参数
-    logger.info("Initializing model with handcrafted features...")
-    logger.info(f"Use handcrafted: {params.use_handcrafted}")
-    if params.use_handcrafted:
-        logger.info(f"Handcrafted directory: {params.handcrafted_dir}")
-        logger.info(f"Fusion method: {params.handcrafted_fusion_method}")
-    
-    model = DualPsychVAETransformer(
+    # 初始化模型
+    model = EventEncoder(
         d_model=params.d_model,
         embed_dim=params.embedding_dim,
-        behavioral_latent_dim=params.behavioral_latent_dim,
-        psych_latent_dim=params.psych_latent_dim,
         n_layers=params.n_layers,
         n_heads=params.n_heads,
         dropout=params.dropout,
         ffn_mult=params.ffn_mult,
-        fusion_behavior=params.fusion_behavior,
-        fusion_psych=params.fusion_psych,
-        recon_dim=len(EVENT_TYPES),
-        # 添加手工特征参数
-        use_handcrafted=params.use_handcrafted,
-        handcrafted_dir=params.handcrafted_dir,
-        handcrafted_fusion_method=params.handcrafted_fusion_method,
+        user_feat_dim=params.user_feat_dim,
+        product_feat_dim=params.product_feat_dim,
+        use_handcrafted_features=params.use_handcrafted_features,
     )
     model.to(device)
+    
     use_amp = device.type == "cuda" and not params.no_amp
-    logger.info("Using device=%s (AMP=%s)", device, use_amp)
+    logger.info("Using device=%s (AMP=%s, Handcrafted=%s)", device, use_amp, params.use_handcrafted_features)
     if device.type == "cuda":
         dev_index = device.index if device.index is not None else torch.cuda.current_device()
         logger.info("CUDA device name: %s", torch.cuda.get_device_name(dev_index))
 
-    logger.info("Training dual-VAE psychological encoder with handcrafted features...")
+    logger.info("Training encoder with contrastive InfoNCE...")
     train_encoder(
         model=model,
         device=device,
@@ -368,12 +303,8 @@ def main(params):
         log_interval=params.log_interval,
         use_amp=use_amp,
         amp_device_type="cuda" if device.type == "cuda" else "cpu",
-        contrastive_weight=params.contrastive_weight,
-        behavior_recon_weight=params.behavior_recon_weight,
-        behavior_kl_weight=params.behavior_kl_weight,
-        psych_recon_weight=params.psych_recon_weight,
-        psych_kl_weight=params.psych_kl_weight,
-        hierarchy_weight=params.hierarchy_weight,
+        feature_loader=feature_loader,
+        use_handcrafted_features=params.use_handcrafted_features,
     )
 
     logger.info("Generating embeddings for relevant clients...")
@@ -386,13 +317,32 @@ def main(params):
         max_seq_len=params.max_seq_len,
         embedding_dim=params.embedding_dim,
         log_interval=params.log_interval,
+        feature_loader=feature_loader,
+        use_handcrafted_features=params.use_handcrafted_features,
     )
 
     logger.info("Saving embeddings and client_ids to %s", str(embeddings_dir))
     np.save(embeddings_dir / "client_ids.npy", client_ids)
     np.save(embeddings_dir / "embeddings.npy", embeddings)
+    
+    # 保存配置信息
+    config_info = {
+        "model_type": "EventEncoder with handcrafted features" if params.use_handcrafted_features else "EventEncoder",
+        "embedding_dim": params.embedding_dim,
+        "d_model": params.d_model,
+        "n_layers": params.n_layers,
+        "n_heads": params.n_heads,
+        "use_handcrafted_features": params.use_handcrafted_features,
+        "user_feat_dim": params.user_feat_dim if params.use_handcrafted_features else "N/A",
+        "product_feat_dim": params.product_feat_dim if params.use_handcrafted_features else "N/A",
+    }
+    
+    with open(embeddings_dir / "config.txt", "w") as f:
+        for key, value in config_info.items():
+            f.write(f"{key}: {value}\n")
 
 
 if __name__ == "__main__":
     parser = get_parser()
-    main(parser.parse_args())
+    params = parser.parse_args()
+    main(params)
