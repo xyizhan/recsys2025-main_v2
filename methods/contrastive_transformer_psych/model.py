@@ -371,7 +371,10 @@ class DualPsychVAETransformer(nn.Module):
         elif self.stats_version == 'gate':    # FiLM
             gamma_beta = self.stats_to_film(stats_emb)
             gamma, beta = gamma_beta.chunk(2, dim=-1)
-            h = (gamma+1) * h + beta
+            
+            gamma = torch.sigmoid(gamma)   # [0, 1]
+            beta = torch.tanh(beta) * 0.5  # [-0.5, 0.5]
+            h = h * gamma + beta
 
         # behaviour
         proj = self.proj(h)
@@ -387,7 +390,7 @@ class DualPsychVAETransformer(nn.Module):
 
         # psych
         psych_out = self.psych_vae(h, sample_latent=sample_latent)
-        
+
         fused = proj
         if self.fusion_behavior > 0:
             fused = fused + self.fusion_behavior * self.behavior_to_embed(behavior_mu)
