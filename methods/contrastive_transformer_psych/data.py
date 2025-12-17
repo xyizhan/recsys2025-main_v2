@@ -26,8 +26,9 @@ TYPE_TO_ID = {
     "search_query": 6,
 }
 
-STATS_DIM = 15
+STATS_DIM = 46
 reference_time = datetime(2022, 11, 9)  
+start_date = datetime(2022, 6, 23)  
 
 # 解析query数组
 def _parse_query(q: str) -> np.ndarray:
@@ -72,70 +73,6 @@ def load_events_df(data_dir: DataDir) -> Dict[str, pd.DataFrame]:
     return dfs
 
 
-# 用户行为的统计特征
-def compute_user_statistics(client_events: pd.DataFrame) -> np.ndarray:
-    stats = []
-    
-    # 基础统计特征 6维
-    stats.append(len(client_events))  # total_actions
-    stats.append(len(client_events[client_events['event_type'] == 'product_buy']))  # buy_count
-    stats.append(len(client_events[client_events['event_type'] == 'add_to_cart']))  # add_count
-    stats.append(len(client_events[client_events['event_type'] == 'remove_from_cart']))  # remove_count
-    stats.append(len(client_events[client_events['event_type'] == 'page_visit']))  # visit_count
-    stats.append(len(client_events[client_events['event_type'] == 'search_query']))  # search_count
-    
-    # 行为频率特征 4维
-    if len(client_events) > 0:
-        time_span = (reference_time - client_events['timestamp'].min()).days
-        if time_span > 0:
-            stats.append(len(client_events) / time_span)  # actions_per_day
-            stats.append(stats[1] / time_span)            # buys_per_day
-        else:
-            stats.extend([0.0, 0.0])
-        
-        # 加购到购买转化率
-        if stats[2] > 0:  # add_count > 0
-            stats.append(stats[1] / stats[2])  # add_to_buy_ratio
-        else:
-            stats.append(0.0)
-    else:
-        stats.extend([0.0, 0.0, 0.0])  # actions_per_day, buys_per_day, add_to_buy_ratio
-    
-    # 近期活跃度 2维
-    stats.append(len(client_events[client_events['timestamp'] >= (reference_time - timedelta(days=7))]))   # actions_7d
-    stats.append(len(client_events[client_events['timestamp'] >= (reference_time - timedelta(days=14))]))  # actions_14d
-    
-    # 心理特征代理 4维
-    buy_events = client_events[client_events['event_type'] == 'product_buy']
-    if len(buy_events) > 0:
-        # 生理需求：价格敏感度
-        if 'price' in buy_events.columns and buy_events['price'].notna().any():
-            prices = buy_events['price'].dropna().values
-            stats.append(np.mean(prices) if len(prices) > 0 else 50.0)  # avg_price
-            stats.append(np.std(prices) if len(prices) > 1 else 0.0)  # price_variance
-        else:
-            stats.extend([50.0, 0.0])
-        
-        # 安全需求：重复购买率
-        if 'sku' in buy_events.columns and buy_events['sku'].notna().any():
-            sku_counts = buy_events['sku'].value_counts()
-            stats.append(sum(sku_counts > 1) / max(len(sku_counts), 1))  # repeat_purchase_rate
-        else:
-            stats.append(0.0)
-            
-        # 探索倾向：品类多样性
-        if 'category' in buy_events.columns and buy_events['category'].notna().any():
-            categories = buy_events['category'].dropna().values
-            unique_cats = len(np.unique(categories))
-            stats.append(unique_cats / max(len(categories), 1))  # category_diversity
-        else:
-            stats.append(0.0)
-    else:
-        stats.extend([50.0, 0.0, 0.0, 0.0])  # avg_price, price_variance, repeat_rate, category_diversity
-
-    return np.array(stats, dtype=np.float32)
-
-
 def build_client_sequences(dfs: Dict[str, pd.DataFrame], relevant_client_ids: np.ndarray) -> Dict[int, pd.DataFrame]:
     frames: List[pd.DataFrame] = []
     for et, df in dfs.items():
@@ -153,7 +90,7 @@ def build_client_sequences(dfs: Dict[str, pd.DataFrame], relevant_client_ids: np
     return groups
 
 
-def collate_sequences(batch_seqs: List[pd.DataFrame], max_len: int) -> Dict[str, torch.Tensor]:
+def collate_sequences(batch_seqs: List[pd.DataFrame], max_len: int, stats_feat) -> Dict[str, torch.Tensor]:
     B = len(batch_seqs)
     type_ids = torch.zeros((B, max_len), dtype=torch.long)
     sku_ids = torch.zeros((B, max_len), dtype=torch.long)
@@ -189,8 +126,7 @@ def collate_sequences(batch_seqs: List[pd.DataFrame], max_len: int) -> Dict[str,
         query_vec[i, :L, :] = torch.tensor(qmat, dtype=torch.float32)
 
         # 统计特征
-        stats_array = compute_user_statistics(df)
-        stats_vec[i, :] = torch.tensor(stats_array, dtype=torch.float32)
+        stats_vec[i, :] = torch.tensor(stats_feat[i], dtype=torch.float32)
 
     return {
         "type_ids": type_ids,
@@ -222,3 +158,108 @@ def augment_views(batch: Dict[str, torch.Tensor], mask_prob: float = 0.1, drop_p
     v1["type_ids"] = _mask_types(v1["type_ids"])
     v2["type_ids"] = _mask_types(v2["type_ids"])
     return v1, v2
+
+
+# 用户行为的统计特征
+def compute_user_statistics(client_events: pd.DataFrame) -> np.ndarray:
+    stats = []
+    
+    # 基础统计特征 8维
+    stats.append(len(client_events))  # total_actions
+    stats.append(len(client_events[client_events['event_type'] == 'product_buy']))  # buy_count
+    stats.append(len(client_events[client_events['event_type'] == 'add_to_cart']))  # add_count
+    stats.append(len(client_events[client_events['event_type'] == 'remove_from_cart']))  # remove_count
+    stats.append(len(client_events[client_events['event_type'] == 'page_visit']))  # visit_count
+    stats.append(len(client_events[client_events['event_type'] == 'search_query']))  # search_count
+    
+    stats.append(client_events['sku'].nunique())    # unique_skus   
+    if 'category' in client_events.columns:         # unique_categories
+        stats.append(client_events['category'].nunique())
+    else:
+        stats.append(0.0)
+    
+    # 行为频率特征 3维
+    if len(client_events) > 0:
+        time_span = (reference_time - client_events['timestamp'].min()).days
+        if time_span > 0:
+            stats.append(len(client_events) / time_span)  # actions_per_day
+            stats.append(stats[1] / time_span)            # buys_per_day (buy_count/time_span)
+        else:
+            stats.extend([0.0, 0.0])
+        
+        # 加购到购买转化率
+        if stats[2] > 0:  # add_count > 0
+            stats.append(stats[1] / stats[2])  # add_to_buy_ratio
+        else:
+            stats.append(0.0)
+    else:
+        stats.extend([0.0, 0.0, 0.0])  # actions_per_day, buys_per_day, add_to_buy_ratio
+    
+    # 近期活跃度 29维
+    time_windows = [7, 14, 30, 90]
+    features_time = _compute_time_window_features(client_events, time_windows)
+
+    for window in time_windows:
+        for event_type in ['add_to_cart', 'remove_from_cart', 'page_visit', 'product_buy', 'search_query']:
+            stats.append(features_time.get(f'{event_type}_{window}d', 0))
+        stats.append(features_time.get(f'active_{window}d', 0))
+    # 流失
+    for event_type in ['add_to_cart', 'remove_from_cart', 'page_visit', 'product_buy', 'search_query']:
+        type_events = client_events[client_events['event_type'] == event_type]
+        if not type_events.empty:
+            recency = (reference_time - type_events['timestamp'].max()).days
+            stats.append(recency)
+        else:
+            stats.append((reference_time - start_date).days)
+    
+    # 心理特征代理 6维
+    buy_events = client_events[client_events['event_type'] == 'product_buy']
+    if len(buy_events) > 0:
+        # 生理需求：价格敏感度
+        if 'price' in buy_events.columns and buy_events['price'].notna().any():
+            prices = buy_events['price'].dropna().values
+            stats.append(np.mean(prices) if len(prices) > 0 else 50.0)  # avg_price
+            stats.append(np.std(prices) if len(prices) > 1 else 0.0)  # price_variance
+            stats.append(np.max(prices) if len(prices) > 0 else 0.0)  # max_price
+        else:
+            stats.extend([50.0, 0.0, 0.0])
+        
+        # 安全需求：重复购买率
+        if 'sku' in buy_events.columns and buy_events['sku'].notna().any():
+            sku_counts = buy_events['sku'].value_counts()
+            stats.append(sum(sku_counts > 1) / max(len(sku_counts), 1))  # repeat_purchase_rate
+        else:
+            stats.append(0.0)
+            
+        # 探索倾向：品类多样性
+        if 'category' in buy_events.columns and buy_events['category'].notna().any():
+            categories = buy_events['category'].dropna().values
+            unique_cats = len(np.unique(categories))
+            stats.append(unique_cats / max(len(categories), 1))            # category_diversity
+            category_counts = buy_events['category'].dropna().value_counts()
+            stats.append(category_counts.max() / max(len(categories), 1))  # category_concentration
+        else:
+            stats.append(0.0, 0.0)
+    else:
+        # avg_price, price_variance, max_price, repeat_rate, category_diversity, category_concentration
+        stats.extend([50.0, 0.0, 0.0, 0.0, 0.0, 0.0])  
+    
+    return np.array(stats, dtype=np.float32)
+
+def _compute_time_window_features(client_events: pd.DataFrame, time_windows: list) -> dict:
+    features = {}
+    cutoffs = {window: reference_time - timedelta(days=window) for window in time_windows}
+    
+    for window, cutoff_date in cutoffs.items():
+        mask = client_events['timestamp'] > cutoff_date
+        window_events = client_events[mask]
+        window_event_counts = window_events['event_type'].value_counts()
+        for event_type in ['add_to_cart', 'remove_from_cart', 'page_visit', 'product_buy', 'search_query']:
+            features[f'{event_type}_{window}d'] = window_event_counts.get(event_type, 0)  
+        # 活跃天数
+        if not window_events.empty:
+            active_days = window_events['timestamp'].dt.normalize().nunique()
+            features[f'active_{window}d'] = active_days
+        else:
+            features[f'active_{window}d'] = 0  
+    return features

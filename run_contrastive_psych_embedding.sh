@@ -7,6 +7,7 @@ log_file="$log_dir/contrastive_psych_${timestamp}.log"
 nohup python -m methods.contrastive_transformer_psych.create_embeddings \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir ../autodl-tmp/embeddings_out/contrastive_transformer_psych_v2_mask_order \
+  --feat_path /root/recsys2025-main_v2/methods/contrastive_transformer_psych/user_stats_cache.pkl \
   --epochs 1 \
   --batch-size 512 \
   --embedding-dim 512 \

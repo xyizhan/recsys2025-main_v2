@@ -265,7 +265,7 @@ class DualPsychVAETransformer(nn.Module):
         fusion_psych: float = 0.5,
         recon_dim: int = 5,
         stats_dim: int = 15,
-        stats_version: str = 'concat'  # concat gate psych
+        stats_version: str = 'concat'  # concat gate attention
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -279,7 +279,8 @@ class DualPsychVAETransformer(nn.Module):
         self.emb_url = nn.Embedding(url_buckets, d_model)
         self.emb_price = nn.Embedding(price_buckets, d_model)
         self.query_proj = nn.Linear(16, d_model)
-        self.stats_proj = nn.Linear(stats_dim, d_model)
+        self.stats_proj = nn.Sequential(nn.BatchNorm1d(stats_dim),
+                                        nn.Linear(stats_dim, d_model))
 
         self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.pos = PositionalEncoding(d_model=d_model)
@@ -297,7 +298,9 @@ class DualPsychVAETransformer(nn.Module):
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.proj = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU(inplace=True), nn.Linear(d_model, embed_dim))
+        self.proj = nn.Sequential(nn.Linear(d_model, d_model), 
+                                  nn.ReLU(inplace=True), 
+                                  nn.Linear(d_model, embed_dim))
         
         # Behavioral VAE head
         self.behavior_mu = nn.Linear(d_model, behavioral_latent_dim)
@@ -336,6 +339,14 @@ class DualPsychVAETransformer(nn.Module):
             nn.Linear(order_hidden, 2),
         )
 
+        # 自适应 fusion_weight
+        self.gated_fusion = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim), 
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1), 
+            nn.Sigmoid() 
+        ) 
+
     def _hash(self, ids: torch.Tensor, buckets: int) -> torch.Tensor:
         return (ids % buckets).clamp(min=0)
 
@@ -365,9 +376,11 @@ class DualPsychVAETransformer(nn.Module):
 
     def forward(self, batch, sample_latent: bool = True) -> dict[str, torch.Tensor]:
         h, stats_emb = self.encode_events(batch)
+
         if self.stats_version == 'concat':    # 拼接映射到d_model
             h_aug = torch.cat([h, stats_emb], dim=-1)
             h = self.h_fusion(h_aug)
+
         elif self.stats_version == 'gate':    # FiLM
             gamma_beta = self.stats_to_film(stats_emb)
             gamma, beta = gamma_beta.chunk(2, dim=-1)
@@ -391,12 +404,15 @@ class DualPsychVAETransformer(nn.Module):
         # psych
         psych_out = self.psych_vae(h, sample_latent=sample_latent)
 
-        fused = proj
-        if self.fusion_behavior > 0:
-            fused = fused + self.fusion_behavior * self.behavior_to_embed(behavior_mu)
-        if self.fusion_psych > 0:
-            fused = fused + self.fusion_psych * self.psych_to_embed(psych_out["latent"])
+        # 自适应的融合权重
+        behavior_embed_raw = self.behavior_to_embed(behavior_mu)
+        psych_embed_raw = self.psych_to_embed(psych_out["latent"])
+        concat_embed = torch.cat([behavior_embed_raw, psych_embed_raw], dim=-1)
+        
+        gate = self.gated_fusion(concat_embed)
+        fused = gate * behavior_embed_raw + (1 - gate) * psych_embed_raw       
         embed = nn.functional.normalize(fused, dim=-1)
+        
         return {
             "embed": embed,
             "sequence_hidden": h,

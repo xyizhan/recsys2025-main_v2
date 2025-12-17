@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import optim
+import pickle
 
 from data_utils.data_dir import DataDir
 from methods.contrastive_transformer_psych.data import (
@@ -70,6 +71,8 @@ def get_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--stats-version", type=str, default='concat')
     p.add_argument("--stats-dim", type=int, default=STATS_DIM)
+    p.add_argument("--feat-path", type=str, required=True, help="Path for handcraft features")
+
     return p
 
 
@@ -199,6 +202,7 @@ def train_encoder(
     mask_prob: float,
     enable_order_predict: bool,
     order_loss_weight: float,
+    stats_feature: list
 ):
     ids = list(client_groups.keys())
     if len(ids) == 0:
@@ -236,7 +240,8 @@ def train_encoder(
             start = step_idx * batch_size
             batch_ids = ids[start : start + batch_size]
             seqs = [client_groups[cid] for cid in batch_ids]
-            batch = collate_sequences(seqs, max_len=max_seq_len)
+            feats = [stats_feature.get(int(cid), None) for cid in batch_ids]
+            batch = collate_sequences(seqs, max_len=max_seq_len, stats_feat=feats)
             batch = {k: v.to(device) for k, v in batch.items()}
             recon_target = build_recon_target(batch["type_ids"])
             v1, v2 = augment_views(batch)
@@ -377,7 +382,8 @@ def generate_embeddings(
         for step_idx, i in enumerate(range(0, client_ids.shape[0], batch_size)):
             batch_ids = client_ids[i : i + batch_size]
             seqs = [client_groups.get(int(cid), None) for cid in batch_ids]
-            batch = collate_sequences(seqs, max_len=max_seq_len)
+            feats = [stats_feature.get(int(cid), None) for cid in batch_ids]
+            batch = collate_sequences(seqs, max_len=max_seq_len, stats_feat=feats)
             batch = {k: v.to(device) for k, v in batch.items()}
             out = model(batch, sample_latent=False)
             embeddings[i : i + batch_ids.shape[0]] = out["embed"].detach().cpu().numpy().astype(np.float16)
@@ -430,6 +436,10 @@ def main(params):
                 len(client_groups),
                 100 * len(train_groups) / max(1, len(client_groups)),
             )
+
+    # 读取手工特征
+    with open(Path(params.feat_path), 'rb') as f:
+        stats_feature = pickle.load(f)
 
     device_arg = params.device.lower()
     if device_arg == "auto":
@@ -487,6 +497,7 @@ def main(params):
         mask_prob=params.mask_prob,
         enable_order_predict=params.enable_order_predict,
         order_loss_weight=params.order_loss_weight,
+        stats_feature=stats_feature
     )
 
     logger.info("Generating embeddings for relevant clients...")
@@ -499,6 +510,7 @@ def main(params):
         max_seq_len=params.max_seq_len,
         embedding_dim=params.embedding_dim,
         log_interval=params.log_interval,
+        stats_feature=stats_feature
     )
 
     logger.info("Saving embeddings and client_ids to %s", str(embeddings_dir))
