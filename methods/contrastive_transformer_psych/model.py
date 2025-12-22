@@ -265,7 +265,7 @@ class DualPsychVAETransformer(nn.Module):
         fusion_psych: float = 0.5,
         recon_dim: int = 5,
         stats_dim: int = 15,
-        stats_version: str = 'concat'  # concat gate attention
+        stats_version: str = 'concat'  # concat gate none
     ) -> None:
         super().__init__()
         self.d_model = d_model

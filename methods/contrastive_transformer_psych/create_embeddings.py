@@ -370,6 +370,7 @@ def generate_embeddings(
     max_seq_len: int,
     embedding_dim: int,
     log_interval: int,
+    stats_feature: list
 ):
     model.eval()
     client_ids = relevant_client_ids.astype(np.int64)
