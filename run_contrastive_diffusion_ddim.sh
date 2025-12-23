@@ -17,7 +17,7 @@ echo "[Stage 1] Starting diffusion embedding generation..."
 python -m methods.contrastive_transformer_diffusion.create_embeddings \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir "$embeddings_dir" \
-  --epochs 1 \
+  --epochs 2 \
   --batch-size 512 \
   --max-seq-len 256 \
   --embedding-dim 512 \
