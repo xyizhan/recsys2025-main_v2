@@ -36,6 +36,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-negatives", type=int, default=64)
+    parser.add_argument("--neighbor-agg", type=str, default="none", choices=["none", "mean", "tgat"])
+    parser.add_argument("--neighbor-k", type=int, default=5)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--train-client-frac", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -214,6 +216,8 @@ def main(params):
         delta_hidden_dim=params.delta_hidden_dim,
         dropout=params.dropout,
         delta_scale=params.delta_scale,
+        neighbor_agg=params.neighbor_agg,
+        neighbor_k=params.neighbor_k,
     )
     model.to(device)
     use_amp = device.type == "cuda" and not params.no_amp
@@ -257,4 +261,3 @@ def main(params):
 if __name__ == "__main__":
     parser = get_parser()
     main(parser.parse_args())
-
