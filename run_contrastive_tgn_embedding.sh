@@ -5,10 +5,12 @@ timestamp=$(date +%m%d_%H%M%S)
 log_dir="logs"
 mkdir -p "$log_dir"
 embeddings_dir="../autodl-tmp/embeddings_out/contrastive_tgn_v1"
-log_file="$log_dir/contrastive_tgn_${timestamp}.log"
+stage1_log="$log_dir/contrastive_tgn_stage1_${timestamp}.log"
+stage2_log="$log_dir/contrastive_tgn_stage2_${timestamp}.log"
 
 echo "===== Stage 1: 生成 TGN Embedding ====="
-python -m methods.contrastive_tgn.create_embeddings \
+echo "Logs: $stage1_log"
+nohup python -m methods.contrastive_tgn.create_embeddings \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir "$embeddings_dir" \
   --epochs 1 \
@@ -19,10 +21,14 @@ python -m methods.contrastive_tgn.create_embeddings \
   --num-negatives 64 \
   --device cuda:0 \
   --log-interval 20 \
-  2>&1 | tee "$log_file"
+  > "$stage1_log" 2>&1 &
+stage1_pid=$!
+wait $stage1_pid
+echo "Stage 1 finished."
 
 echo "===== Stage 2: 训练下游任务 ====="
-python -m training_pipeline.train \
+echo "Logs: $stage2_log"
+nohup python -m training_pipeline.train \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir "$embeddings_dir" \
   --tasks churn propensity_category propensity_sku conversion \
@@ -31,6 +37,9 @@ python -m training_pipeline.train \
   --accelerator gpu \
   --devices 0 \
   --score-dir "$embeddings_dir" \
-  2>&1 | tee -a "$log_file"
+  > "$stage2_log" 2>&1 &
+stage2_pid=$!
+wait $stage2_pid
+echo "Stage 2 finished."
 
-echo "TGN embedding + downstream training finished. Logs: $log_file"
+echo "TGN embedding + downstream training complete. Logs: $stage1_log , $stage2_log"
