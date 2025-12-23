@@ -31,10 +31,7 @@ nohup python -m methods.contrastive_tgn.create_embeddings \
   > "$stage1_log" 2>&1 &
 stage1_pid=$!
 wait $stage1_pid
-echo "Stage 1 finished."
 
-echo "===== Stage 2: 训练下游任务 ====="
-echo "Logs: $stage2_log"
 nohup python -m training_pipeline.train \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir "$embeddings_dir" \
@@ -47,6 +44,5 @@ nohup python -m training_pipeline.train \
   > "$stage2_log" 2>&1 &
 stage2_pid=$!
 wait $stage2_pid
-echo "Stage 2 finished."
 
-echo "TGN mean+ODE experiment complete. Logs: $stage1_log , $stage2_log"
+echo "TGN mean+ODE experiment launched. Logs: $stage1_log , $stage2_log"
