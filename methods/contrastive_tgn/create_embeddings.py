@@ -41,6 +41,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--time-update", type=str, default="none", choices=["none", "decay", "ode"])
     parser.add_argument("--decay-rate", type=float, default=1.0)
     parser.add_argument("--ode-steps", type=int, default=4)
+    parser.add_argument("--time-update-clip", type=float, default=20.0)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--train-client-frac", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -224,6 +225,7 @@ def main(params):
         time_update_mode=params.time_update,
         decay_rate=params.decay_rate,
         ode_steps=params.ode_steps,
+        time_update_clip=params.time_update_clip,
     )
     model.to(device)
     use_amp = device.type == "cuda" and not params.no_amp

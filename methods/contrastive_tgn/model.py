@@ -34,6 +34,7 @@ class TGNEncoder(nn.Module):
         time_update_mode: str = "none",
         decay_rate: float = 1.0,
         ode_steps: int = 4,
+        time_update_clip: float = 20.0,
     ) -> None:
         super().__init__()
         self.item_bucket_count = int(item_bucket_count)
@@ -44,6 +45,7 @@ class TGNEncoder(nn.Module):
         self.time_update_mode = time_update_mode
         self.decay_rate = float(decay_rate)
         self.ode_steps = max(1, int(ode_steps))
+        self.time_update_clip = float(time_update_clip)
 
         self.type_embedding = nn.Embedding(type_vocab_size, embed_dim, padding_idx=0)
         self.item_embedding = nn.Embedding(item_bucket_count, embed_dim, padding_idx=0)
@@ -250,6 +252,10 @@ class TGNEncoder(nn.Module):
             return hidden
         apply_mask = prev_mask.unsqueeze(-1)
         scaled_delta = delta_t / max(self.delta_scale, 1e-6)
+        scaled_delta = torch.clamp(scaled_delta, min=0.0)
+        if self.time_update_clip > 0:
+            scaled_delta = torch.clamp(scaled_delta, max=self.time_update_clip)
+        scaled_delta = torch.where(prev_mask, scaled_delta, torch.zeros_like(scaled_delta))
         if self.time_update_mode == "decay":
             decay = torch.exp(-self.decay_rate * scaled_delta).unsqueeze(-1)
             updated = hidden * decay
