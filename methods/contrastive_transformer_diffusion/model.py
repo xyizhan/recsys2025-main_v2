@@ -21,6 +21,19 @@ def sinusoidal_timestep_embedding(timesteps: torch.Tensor, dim: int) -> torch.Te
     return emb
 
 
+class FieldWiseFiLM(nn.Module):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model * 2),
+        )
+
+    def forward(self, base: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        scale, shift = torch.chunk(self.net(cond), 2, dim=-1)
+        return base * (1.0 + scale) + shift
+
+
 class ConditionalDiffusionHead(nn.Module):
     def __init__(
         self,
@@ -87,6 +100,11 @@ class ContrastiveDiffusionEncoder(nn.Module):
         self.emb_url = nn.Embedding(url_buckets, d_model)
         self.emb_price = nn.Embedding(price_buckets, d_model)
         self.query_proj = nn.Linear(16, d_model)
+        self.film_sku = FieldWiseFiLM(d_model)
+        self.film_cat = FieldWiseFiLM(d_model)
+        self.film_url = FieldWiseFiLM(d_model)
+        self.film_price = FieldWiseFiLM(d_model)
+        self.film_query = FieldWiseFiLM(d_model)
         self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.pos = PositionalEncoding(d_model=d_model)
         self.gelu = nn.GELU()
@@ -140,17 +158,24 @@ class ContrastiveDiffusionEncoder(nn.Module):
         return (ids % buckets).clamp(min=0)
 
     def encode_events(self, batch, return_sequence: bool = False) -> torch.Tensor:
+        if "type_ids" not in batch:
+            raise ValueError("batch must contain type_ids for base embedding")
         x = self.emb_type(self._hash(batch["type_ids"], self.emb_type.num_embeddings))
         if "sku_ids" in batch:
-            x = x + self.emb_sku(self._hash(batch["sku_ids"], self.emb_sku.num_embeddings))
+            sku_emb = self.emb_sku(self._hash(batch["sku_ids"], self.emb_sku.num_embeddings))
+            x = self.film_sku(x, sku_emb)
         if "cat_ids" in batch:
-            x = x + self.emb_cat(self._hash(batch["cat_ids"], self.emb_cat.num_embeddings))
+            cat_emb = self.emb_cat(self._hash(batch["cat_ids"], self.emb_cat.num_embeddings))
+            x = self.film_cat(x, cat_emb)
         if "price_ids" in batch:
-            x = x + self.emb_price(self._hash(batch["price_ids"], self.emb_price.num_embeddings))
+            price_emb = self.emb_price(self._hash(batch["price_ids"], self.emb_price.num_embeddings))
+            x = self.film_price(x, price_emb)
         if "url_ids" in batch:
-            x = x + self.emb_url(self._hash(batch["url_ids"], self.emb_url.num_embeddings))
+            url_emb = self.emb_url(self._hash(batch["url_ids"], self.emb_url.num_embeddings))
+            x = self.film_url(x, url_emb)
         if "query_vec" in batch:
-            x = x + self.query_proj(batch["query_vec"])
+            query_emb = self.query_proj(batch["query_vec"])
+            x = self.film_query(x, query_emb)
         x = self.ln(self.gelu(x))
         B = x.size(0)
         cls = self.cls.expand(B, -1, -1)
@@ -161,13 +186,15 @@ class ContrastiveDiffusionEncoder(nn.Module):
             return x
         return x[:, 0, :]
 
-    def forward(self, batch, sample_diffused: bool = False) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        batch,
+        sampling_method: str = "ddim",
+        sampling_steps: int | None = None,
+    ) -> dict[str, torch.Tensor]:
         hidden = self.encode_events(batch)
         base_latent = self.latent_proj(hidden)
-        if sample_diffused:
-            latent = self.sample_latent(hidden)
-        else:
-            latent = base_latent
+        latent = self.sample_latent(hidden, steps=sampling_steps, method=sampling_method)
         embed = nn.functional.normalize(self.embed_proj(latent), dim=-1)
         return {
             "embed": embed,
@@ -199,13 +226,22 @@ class ContrastiveDiffusionEncoder(nn.Module):
         loss = nn.functional.mse_loss(eps_pred, noise)
         return loss
 
-    def sample_latent(self, hidden: torch.Tensor, steps: int | None = None) -> torch.Tensor:
+    def sample_latent(self, hidden: torch.Tensor, steps: int | None = None, method: str = "ddim") -> torch.Tensor:
         steps = steps if steps is not None else self.diffusion_timesteps
         steps = min(max(1, steps), self.diffusion_timesteps)
+        if method.lower() == "ddpm":
+            if steps != self.diffusion_timesteps:
+                raise ValueError("DDPM sampling requires steps equal to diffusion_timesteps")
+            return self._sample_latent_ddpm(hidden)
+        if method.lower() != "ddim":
+            raise ValueError(f"Unsupported sampling method: {method}")
+        return self._sample_latent_ddim(hidden, steps)
+
+    def _sample_latent_ddpm(self, hidden: torch.Tensor) -> torch.Tensor:
         B = hidden.size(0)
         device = hidden.device
         latent = torch.randn((B, self.latent_dim), device=device)
-        for i in reversed(range(steps)):
+        for i in reversed(range(self.diffusion_timesteps)):
             t = torch.full((B,), i, device=device, dtype=torch.long)
             eps_theta = self.predict_noise(latent, hidden, t)
             beta_t = self.betas[i]
@@ -216,4 +252,37 @@ class ContrastiveDiffusionEncoder(nn.Module):
                 noise = torch.randn_like(latent)
                 var = self.posterior_variance[i]
                 latent = latent + torch.sqrt(var) * noise
+        return latent
+
+    def _build_sampling_schedule(self, steps: int) -> list[int]:
+        if steps >= self.diffusion_timesteps:
+            return list(range(self.diffusion_timesteps - 1, -1, -1))
+        values = torch.linspace(self.diffusion_timesteps - 1, 0, steps)
+        indices = torch.round(values).to(torch.long).cpu().tolist()
+        schedule: list[int] = []
+        for idx in indices:
+            if not schedule or schedule[-1] != idx:
+                schedule.append(idx)
+        if schedule[-1] != 0:
+            schedule.append(0)
+        return schedule
+
+    def _sample_latent_ddim(self, hidden: torch.Tensor, steps: int) -> torch.Tensor:
+        B = hidden.size(0)
+        device = hidden.device
+        latent = torch.randn((B, self.latent_dim), device=device)
+        schedule = self._build_sampling_schedule(steps)
+        for i, t_idx in enumerate(schedule):
+            t = torch.full((B,), t_idx, device=device, dtype=torch.long)
+            eps_theta = self.predict_noise(latent, hidden, t)
+            alpha_t = self.alphas_cumprod[t_idx].to(device=device)
+            alpha_prev = torch.tensor(1.0, device=device)
+            if i + 1 < len(schedule):
+                alpha_prev = self.alphas_cumprod[schedule[i + 1]].to(device=device)
+            sqrt_alpha_t = torch.sqrt(alpha_t).clamp(min=1e-6)
+            sqrt_one_minus_alpha_t = torch.sqrt(torch.clamp(1 - alpha_t, min=0.0))
+            x0_pred = (latent - sqrt_one_minus_alpha_t * eps_theta) / sqrt_alpha_t
+            sqrt_alpha_prev = torch.sqrt(alpha_prev).clamp(min=1e-6)
+            sqrt_one_minus_alpha_prev = torch.sqrt(torch.clamp(1 - alpha_prev, min=0.0))
+            latent = sqrt_alpha_prev * x0_pred + sqrt_one_minus_alpha_prev * eps_theta
         return latent

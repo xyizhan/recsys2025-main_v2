@@ -47,6 +47,8 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--diffusion-time-embed-dim", type=int, default=64)
     p.add_argument("--contrastive-weight", type=float, default=1.0)
     p.add_argument("--diffusion-weight", type=float, default=1.0)
+    p.add_argument("--sampling-method", type=str, default="ddim", choices=["ddim", "ddpm"])
+    p.add_argument("--sampling-steps", type=int, default=15)
     return p
 
 
@@ -64,6 +66,8 @@ def train_encoder(
     amp_device_type: str,
     contrastive_weight: float,
     diffusion_weight: float,
+    sampling_method: str,
+    sampling_steps: int,
 ):
     ids = list(client_groups.keys())
     if len(ids) == 0:
@@ -94,8 +98,8 @@ def train_encoder(
 
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
-                out1 = model(v1, sample_diffused=False)
-                out2 = model(v2, sample_diffused=False)
+                out1 = model(v1, sampling_method=sampling_method, sampling_steps=sampling_steps)
+                out2 = model(v2, sampling_method=sampling_method, sampling_steps=sampling_steps)
                 ctr_loss = info_nce_loss(out1["embed"], out2["embed"], temperature=temperature)
                 diff_loss = 0.5 * (
                     model.diffusion_loss(out1["base_latent"], out1["hidden"])
@@ -145,6 +149,8 @@ def generate_embeddings(
     max_seq_len: int,
     embedding_dim: int,
     log_interval: int,
+    sampling_method: str,
+    sampling_steps: int,
 ):
     model.eval()
     client_ids = relevant_client_ids.astype(np.int64)
@@ -159,7 +165,7 @@ def generate_embeddings(
             seqs = [client_groups.get(int(cid), None) for cid in batch_ids]
             batch = collate_sequences(seqs, max_len=max_seq_len)
             batch = {k: v.to(device) for k, v in batch.items()}
-            out = model(batch, sample_diffused=True)
+            out = model(batch, sampling_method=sampling_method, sampling_steps=sampling_steps)
             embeddings[i : i + batch_ids.shape[0]] = out["embed"].detach().cpu().numpy().astype(np.float16)
             if (step_idx + 1) % log_interval == 0 or (step_idx + 1) == steps:
                 processed = min(i + batch_ids.shape[0], total)
@@ -257,6 +263,8 @@ def main(params):
         amp_device_type="cuda" if device.type == "cuda" else "cpu",
         contrastive_weight=params.contrastive_weight,
         diffusion_weight=params.diffusion_weight,
+        sampling_method=params.sampling_method,
+        sampling_steps=params.sampling_steps,
     )
 
     logger.info("Generating embeddings for relevant clients (diffusion sampling)...")
@@ -269,6 +277,8 @@ def main(params):
         max_seq_len=params.max_seq_len,
         embedding_dim=params.embedding_dim,
         log_interval=params.log_interval,
+        sampling_method=params.sampling_method,
+        sampling_steps=params.sampling_steps,
     )
 
     logger.info("Saving embeddings and client_ids to %s", str(embeddings_dir))
