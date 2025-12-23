@@ -18,6 +18,8 @@ nohup python -m methods.contrastive_tgn.create_embeddings \
   --max-seq-len 256 \
   --embedding-dim 256 \
   --item-bucket-count 100000 \
+  --neighbor-agg tgat \
+  --neighbor-k 8 \
   --num-negatives 64 \
   --device cuda:0 \
   --log-interval 20 \
