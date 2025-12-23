@@ -5,7 +5,6 @@ import math
 
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence
 import torch.nn.functional as F
 
 
@@ -32,6 +31,9 @@ class TGNEncoder(nn.Module):
         delta_scale: float = 3600.0,
         neighbor_agg: str = "none",
         neighbor_k: int = 5,
+        time_update_mode: str = "none",
+        decay_rate: float = 1.0,
+        ode_steps: int = 4,
     ) -> None:
         super().__init__()
         self.item_bucket_count = int(item_bucket_count)
@@ -39,6 +41,9 @@ class TGNEncoder(nn.Module):
         self.delta_scale = float(delta_scale)
         self.neighbor_agg = neighbor_agg
         self.neighbor_k = int(neighbor_k)
+        self.time_update_mode = time_update_mode
+        self.decay_rate = float(decay_rate)
+        self.ode_steps = max(1, int(ode_steps))
 
         self.type_embedding = nn.Embedding(type_vocab_size, embed_dim, padding_idx=0)
         self.item_embedding = nn.Embedding(item_bucket_count, embed_dim, padding_idx=0)
@@ -49,7 +54,7 @@ class TGNEncoder(nn.Module):
         )
         self.input_ln = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
-        self.gru = nn.GRU(embed_dim, embed_dim, batch_first=True)
+        self.gru_cell = nn.GRUCell(embed_dim, embed_dim)
         if self.neighbor_agg not in {"none", "mean", "tgat"}:
             raise ValueError(f"Unsupported neighbor aggregator '{self.neighbor_agg}'")
         if self.neighbor_agg == "tgat":
@@ -60,6 +65,14 @@ class TGNEncoder(nn.Module):
                 nn.Linear(1, delta_hidden_dim),
                 nn.SiLU(),
                 nn.Linear(delta_hidden_dim, embed_dim),
+            )
+        if self.time_update_mode not in {"none", "decay", "ode"}:
+            raise ValueError(f"Unsupported time update mode '{self.time_update_mode}'")
+        if self.time_update_mode == "ode":
+            self.ode_func = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim),
+                nn.SiLU(),
+                nn.Linear(embed_dim, embed_dim),
             )
 
     def _hash_items(self, sku_ids: torch.Tensor) -> torch.Tensor:
@@ -96,17 +109,25 @@ class TGNEncoder(nn.Module):
         inputs = self.dropout(inputs)
 
         lengths = mask.long().sum(dim=1)
-        safe_lengths = lengths.clone()
-        safe_lengths[safe_lengths <= 0] = 1
+        delta = torch.zeros_like(timestamps)
+        if inputs.size(1) > 1:
+            delta[:, 1:] = timestamps[:, 1:] - timestamps[:, :-1]
+        delta = torch.clamp(delta, min=0.0)
+        delta = delta * mask.float()
 
-        packed = pack_padded_sequence(
-            inputs,
-            lengths=safe_lengths.cpu(),
-            batch_first=True,
-            enforce_sorted=False,
-        )
-        _, hidden = self.gru(packed)
-        user_emb = hidden[-1]
+        hidden = torch.zeros((type_ids.size(0), self.embed_dim), device=inputs.device)
+        for t in range(inputs.size(1)):
+            step_mask = mask[:, t]
+            if not bool(step_mask.any()):
+                continue
+            if self.time_update_mode != "none" and t > 0:
+                prev_mask = mask[:, t - 1]
+                hidden = self._apply_time_update(hidden, delta[:, t], prev_mask)
+            x_t = inputs[:, t, :]
+            updated = self.gru_cell(x_t, hidden)
+            hidden = torch.where(step_mask.unsqueeze(-1), updated, hidden)
+
+        user_emb = F.normalize(hidden, dim=-1)
         user_emb = F.normalize(user_emb, dim=-1)
 
         batch_indices = torch.arange(type_ids.size(0), device=type_ids.device)
@@ -218,6 +239,29 @@ class TGNEncoder(nn.Module):
         context = torch.sum(weights.unsqueeze(-1) * values, dim=2)
         context = torch.where(mask.unsqueeze(-1), context, torch.zeros_like(context))
         return context
+
+    def _apply_time_update(
+        self,
+        hidden: torch.Tensor,
+        delta_t: torch.Tensor,
+        prev_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if not torch.any(prev_mask):
+            return hidden
+        apply_mask = prev_mask.unsqueeze(-1)
+        scaled_delta = delta_t / max(self.delta_scale, 1e-6)
+        if self.time_update_mode == "decay":
+            decay = torch.exp(-self.decay_rate * scaled_delta).unsqueeze(-1)
+            updated = hidden * decay
+        elif self.time_update_mode == "ode":
+            step = (scaled_delta / float(self.ode_steps)).unsqueeze(-1)
+            updated = hidden
+            for _ in range(self.ode_steps):
+                deriv = self.ode_func(updated)
+                updated = updated + step * deriv
+        else:
+            updated = hidden
+        return torch.where(apply_mask, updated, hidden)
 
 
 def sampled_ranking_loss(

@@ -38,6 +38,9 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-negatives", type=int, default=64)
     parser.add_argument("--neighbor-agg", type=str, default="none", choices=["none", "mean", "tgat"])
     parser.add_argument("--neighbor-k", type=int, default=5)
+    parser.add_argument("--time-update", type=str, default="none", choices=["none", "decay", "ode"])
+    parser.add_argument("--decay-rate", type=float, default=1.0)
+    parser.add_argument("--ode-steps", type=int, default=4)
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--train-client-frac", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -218,6 +221,9 @@ def main(params):
         delta_scale=params.delta_scale,
         neighbor_agg=params.neighbor_agg,
         neighbor_k=params.neighbor_k,
+        time_update_mode=params.time_update,
+        decay_rate=params.decay_rate,
+        ode_steps=params.ode_steps,
     )
     model.to(device)
     use_amp = device.type == "cuda" and not params.no_amp

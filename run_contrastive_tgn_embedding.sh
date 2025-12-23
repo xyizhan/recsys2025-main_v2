@@ -20,6 +20,9 @@ nohup python -m methods.contrastive_tgn.create_embeddings \
   --item-bucket-count 100000 \
   --neighbor-agg tgat \
   --neighbor-k 8 \
+  --time-update ode \
+  --decay-rate 0.5 \
+  --ode-steps 4 \
   --num-negatives 64 \
   --device cuda:0 \
   --log-interval 20 \
