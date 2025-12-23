@@ -7,12 +7,14 @@ mkdir -p "$log_dir"
 embeddings_dir="../autodl-tmp/embeddings_out/contrastive_tgn_mean_decay"
 score_dir="../scores_out/tgn_mean_decay"
 mkdir -p "$score_dir"
-stage1_log="$log_dir/contrastive_tgn_mean_decay_stage1_${timestamp}.log"
-stage2_log="$log_dir/contrastive_tgn_mean_decay_stage2_${timestamp}.log"
+log_file="$log_dir/contrastive_tgn_mean_decay_${timestamp}.log"
 
 echo "===== Stage 1: 生成 TGN Embedding (Mean 邻域 + Decay) ====="
-echo "Logs: $stage1_log"
-nohup python -m methods.contrastive_tgn.create_embeddings \
+echo "Logs: $log_file"
+nohup bash <<EOF > "$log_file" 2>&1 &
+set -euo pipefail
+echo "[Stage 1] Starting embedding generation..."
+python -m methods.contrastive_tgn.create_embeddings \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir "$embeddings_dir" \
   --epochs 1 \
@@ -26,12 +28,10 @@ nohup python -m methods.contrastive_tgn.create_embeddings \
   --decay-rate 0.6 \
   --num-negatives 64 \
   --device cuda:0 \
-  --log-interval 20 \
-  > "$stage1_log" 2>&1 &
-stage1_pid=$!
-wait $stage1_pid
+  --log-interval 20
 
-nohup python -m training_pipeline.train \
+echo "[Stage 2] Starting downstream training..."
+python -m training_pipeline.train \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir "$embeddings_dir" \
   --tasks churn propensity_category propensity_sku conversion \
@@ -39,9 +39,7 @@ nohup python -m training_pipeline.train \
   --num-workers 10 \
   --accelerator gpu \
   --devices 0 \
-  --score-dir "$score_dir" \
-  > "$stage2_log" 2>&1 &
-stage2_pid=$!
-wait $stage2_pid
+  --score-dir "$score_dir"
+EOF
 
-echo "TGN mean+decay experiment launched. Logs: $stage1_log , $stage2_log"
+echo "TGN mean+decay experiment launched. Logs: $log_file"
