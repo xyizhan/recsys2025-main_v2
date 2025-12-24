@@ -124,16 +124,18 @@ def augment_views(
         keep_float3 = keep_float.unsqueeze(-1)
         view: FieldBatch = {}
         for key, tensor in batch.items():
+            if key == "stats_vec":
+                view[key] = tensor  # do not apply sequence dropout to global features
+                continue
             if tensor.dim() == 3:
                 view[key] = tensor * keep_float3
             else:
-                dtype = tensor.dtype
-                if dtype == torch.long:
+                if tensor.size(1) != keep_long.size(1):
+                    view[key] = tensor
+                elif tensor.dtype == torch.long:
                     view[key] = tensor * keep_long
                 else:
                     view[key] = tensor * keep_float
-        if "stats_vec" in batch:
-            view["stats_vec"] = batch["stats_vec"]
         mask_token = torch.tensor(TYPE_TO_ID["MASK"], device=device)
         mask_flag = torch.rand((B, L), device=device) < mask_prob
         view["type_ids"] = torch.where(mask_flag, mask_token, view["type_ids"])
