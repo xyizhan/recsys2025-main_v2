@@ -118,7 +118,7 @@ class ConditionalDiffusionHead(nn.Module):
         self.time_embed = nn.Sequential(
             nn.Linear(time_embed_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, cond_dim),
+            nn.Linear(hidden_dim, hidden_dim),
         )
         self.cond_proj = nn.Linear(cond_dim, hidden_dim)
         self.latent_proj = nn.Linear(latent_dim, hidden_dim)
@@ -252,7 +252,9 @@ class UnifiedDiffusionModel(nn.Module):
         drop_mask = torch.rand((B,), device=condition_hidden.device) < self.cfg_drop_prob
         if drop_mask.any():
             cond = condition_hidden.clone()
-            cond[drop_mask] = self.null_condition.to(condition_hidden.device)
+            null_vec = self.null_condition.to(condition_hidden.device)
+            count = int(drop_mask.sum().item())
+            cond[drop_mask] = null_vec.unsqueeze(0).expand(count, -1)
             return cond
         return condition_hidden
 
