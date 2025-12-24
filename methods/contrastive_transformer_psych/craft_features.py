@@ -37,7 +37,7 @@ def get_parser() -> argparse.ArgumentParser:
 def main(args: argparse.Namespace) -> None:
     data_dir = DataDir(Path(args.data_dir))
     relevant_client_ids = np.load(data_dir.input_dir / "relevant_clients.npy")
-    print(f"[craft_features] Loading input events from {data_dir.base_dir}")
+    print(f"[craft_features] Loading input events from {data_dir.data_dir}")
     dfs = load_events_df(data_dir=data_dir)
     print("[craft_features] Building client sequences...")
     client_groups = build_client_sequences(dfs=dfs, relevant_client_ids=relevant_client_ids)
