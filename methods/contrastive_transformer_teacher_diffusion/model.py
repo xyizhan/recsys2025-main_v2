@@ -72,7 +72,7 @@ class TypeConditionedSequenceEncoder(nn.Module):
         contribs["url"] = self.emb_url(self._hash(batch["url_ids"], self.emb_url.num_embeddings))
         contribs["price"] = self.emb_price(self._hash(batch["price_ids"], self.emb_price.num_embeddings))
         contribs["query"] = self.query_proj(batch["query_vec"])
-        delta = batch["delta_times"].unsqueeze(-1)
+        delta = torch.log1p(torch.clamp(batch["delta_times"], min=0.0)).unsqueeze(-1)
         contribs["delta"] = self.delta_proj(delta)
 
         for idx, fname in enumerate(self.field_names):
@@ -103,7 +103,7 @@ class ProjectionHead(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return nn.functional.normalize(self.net(x), dim=-1)
+        return nn.functional.normalize(self.net(x), dim=-1, eps=1e-6)
 
 
 class ConditionalDiffusionHead(nn.Module):
@@ -230,8 +230,16 @@ class UnifiedDiffusionModel(nn.Module):
 
     @torch.no_grad()
     def teacher_embed(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        enc_was_training = self.teacher_encoder.training
+        head_was_training = self.teacher_head.training
+        self.teacher_encoder.eval()
+        self.teacher_head.eval()
         hidden = self.teacher_encoder(batch)
         embed = self.teacher_head(hidden)
+        if enc_was_training:
+            self.teacher_encoder.train()
+        if head_was_training:
+            self.teacher_head.train()
         return embed.detach()
 
     def diffusion_loss(self, condition_hidden: torch.Tensor, teacher_target: torch.Tensor) -> torch.Tensor:

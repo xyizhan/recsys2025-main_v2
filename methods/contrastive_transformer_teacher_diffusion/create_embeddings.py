@@ -118,10 +118,10 @@ def train_model(
                 s1 = model.student_forward(v1)
                 s2 = model.student_forward(v2)
                 ctr_loss = info_nce_loss(s1["embed"], s2["embed"], temperature=temperature)
-                base_hidden = model.student_encoder(batch)
-                teacher_target = model.teacher_embed(batch)
-                diff_loss = model.diffusion_loss(base_hidden, teacher_target)
-                loss = contrastive_weight * ctr_loss + diffusion_weight * diff_loss
+            base_hidden = model.student_encoder(batch)
+            teacher_target = model.teacher_embed(batch).to(base_hidden.dtype)
+            diff_loss = model.diffusion_loss(base_hidden, teacher_target)
+            loss = contrastive_weight * ctr_loss + diffusion_weight * diff_loss
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
