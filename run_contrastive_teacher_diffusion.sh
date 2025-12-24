@@ -17,7 +17,7 @@ echo "[Stage 1] Starting teacher-student diffusion embedding generation..."
 python -m methods.contrastive_transformer_teacher_diffusion.create_embeddings \
   --data-dir ../autodl-tmp/recsys_new \
   --embeddings-dir "$embeddings_dir" \
-  --epochs 2 \
+  --epochs 1 \
   --batch-size 512 \
   --max-seq-len 256 \
   --embedding-dim 512 \
