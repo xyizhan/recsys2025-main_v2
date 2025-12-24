@@ -4,10 +4,10 @@ set -euo pipefail
 timestamp=$(date +%m%d_%H%M%S)
 log_dir="logs"
 mkdir -p "$log_dir"
-embeddings_dir="../autodl-tmp/embeddings_out/contrastive_teacher_diffusion"
-score_dir="../scores_out/teacher_diffusion"
+embeddings_dir="../autodl-tmp/embeddings_out/contrastive_teacher_diffusion_v2_handcraft"
+score_dir="../scores_out/teacher_diffusion_v2_handcraft"
 mkdir -p "$score_dir"
-log_file="$log_dir/contrastive_teacher_diffusion_${timestamp}.log"
+log_file="$log_dir/contrastive_teacher_diffusion_v2_handcraft_${timestamp}.log"
 
 echo "===== Stage 1: 生成 Conditional Diffusion 统一表征 ====="
 echo "Logs: $log_file"
