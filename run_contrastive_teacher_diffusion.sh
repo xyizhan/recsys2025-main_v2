@@ -45,6 +45,8 @@ python -m methods.contrastive_transformer_teacher_diffusion.create_embeddings \
   --sampling-method ddim \
   --sampling-steps 20 \
   --num-samples 4 \
+  --stats-dim 46 \
+  --feat-path /root/recsys2025-main_v2/methods/contrastive_transformer_psych/user_stats_cache.pkl \
   --debug-logging
 
 echo "[Stage 2] Starting downstream training..."

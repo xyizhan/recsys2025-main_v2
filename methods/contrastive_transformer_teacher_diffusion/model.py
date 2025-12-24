@@ -24,9 +24,11 @@ class TypeConditionedSequenceEncoder(nn.Module):
         url_buckets: int = 65536,
         price_buckets: int = 128,
         type_buckets: int = 8,
+        stats_dim: int = 0,
     ) -> None:
         super().__init__()
         self.d_model = d_model
+        self.stats_dim = stats_dim
         self.emb_type = nn.Embedding(type_buckets, d_model)
         self.emb_sku = nn.Embedding(sku_buckets, d_model)
         self.emb_cat = nn.Embedding(cat_buckets, d_model)
@@ -43,6 +45,13 @@ class TypeConditionedSequenceEncoder(nn.Module):
         )
         self.field_gate = nn.Embedding(type_buckets, len(self.field_names))
         nn.init.xavier_uniform_(self.field_gate.weight)
+        if stats_dim > 0:
+            self.stats_proj = nn.Sequential(
+                nn.LayerNorm(stats_dim),
+                nn.Linear(stats_dim, d_model),
+                nn.GELU(),
+            )
+            self.stats_film = nn.Linear(d_model, d_model * 2)
         self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.pos = PositionalEncoding(d_model=d_model)
         self.dropout = nn.Dropout(dropout)
@@ -90,7 +99,16 @@ class TypeConditionedSequenceEncoder(nn.Module):
         x = torch.cat([cls, x], dim=1)
         x = self.dropout(self.pos(x))
         x = self.encoder(x)
-        return x[:, 0, :]
+        cls_hidden = x[:, 0, :]
+        if self.stats_dim > 0 and "stats_vec" in batch:
+            stats_feat = batch["stats_vec"]
+            stats_hidden = self.stats_proj(stats_feat)
+            gamma_beta = self.stats_film(stats_hidden)
+            gamma, beta = gamma_beta.chunk(2, dim=-1)
+            gamma = torch.sigmoid(gamma)
+            beta = torch.tanh(beta) * 0.5
+            cls_hidden = cls_hidden * gamma + beta
+        return cls_hidden
 
 
 class ProjectionHead(nn.Module):
@@ -173,6 +191,7 @@ class UnifiedDiffusionModel(nn.Module):
         diffusion_hidden_dim: int = 512,
         diffusion_time_embed_dim: int = 64,
         cfg_drop_prob: float = 0.1,
+        stats_dim: int = 0,
     ) -> None:
         super().__init__()
         encoder_kwargs = dict(
@@ -186,6 +205,7 @@ class UnifiedDiffusionModel(nn.Module):
             url_buckets=url_buckets,
             price_buckets=price_buckets,
             type_buckets=type_buckets,
+            stats_dim=stats_dim,
         )
         self.student_encoder = TypeConditionedSequenceEncoder(**encoder_kwargs)
         self.teacher_encoder = TypeConditionedSequenceEncoder(**encoder_kwargs)

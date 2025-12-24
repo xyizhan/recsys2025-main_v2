@@ -25,7 +25,7 @@ def _compute_delta_seconds(timestamps) -> np.ndarray:
     return seconds.astype(np.float32)
 
 
-def collate_sequences(batch_seqs: List, max_len: int) -> FieldBatch:
+def collate_sequences(batch_seqs: List, max_len: int, stats_feat: List[np.ndarray] | None = None, stats_dim: int = 0) -> FieldBatch:
     B = len(batch_seqs)
     device = torch.device("cpu")
     type_ids = torch.zeros((B, max_len), dtype=torch.long, device=device)
@@ -42,6 +42,7 @@ def collate_sequences(batch_seqs: List, max_len: int) -> FieldBatch:
     url_mask = torch.zeros((B, max_len), dtype=torch.float32, device=device)
     query_mask = torch.zeros((B, max_len), dtype=torch.float32, device=device)
     delta_mask = torch.zeros((B, max_len), dtype=torch.float32, device=device)
+    stats_vec = torch.zeros((B, stats_dim), dtype=torch.float32, device=device) if stats_dim > 0 else None
 
     for i, df in enumerate(batch_seqs):
         if df is None or df.shape[0] == 0:
@@ -79,8 +80,17 @@ def collate_sequences(batch_seqs: List, max_len: int) -> FieldBatch:
         qmat = np.stack(q_rows, axis=0) if len(q_rows) > 0 else np.zeros((L, 16), dtype=np.float32)
         query_vec[i, :L, :] = torch.tensor(qmat, dtype=torch.float32)
         query_mask[i, :L] = torch.tensor(q_mask_vals, dtype=torch.float32)
+        if stats_vec is not None and stats_feat is not None:
+            feat = stats_feat[i]
+            if feat is None:
+                stats_vec[i, :] = torch.zeros(stats_dim, dtype=torch.float32)
+            else:
+                vec = np.asarray(feat, dtype=np.float32)
+                if vec.shape[0] != stats_dim:
+                    vec = np.resize(vec, stats_dim)
+                stats_vec[i, :] = torch.tensor(vec, dtype=torch.float32)
 
-    return {
+    batch = {
         "type_ids": type_ids,
         "sku_ids": sku_ids,
         "cat_ids": cat_ids,
@@ -95,6 +105,9 @@ def collate_sequences(batch_seqs: List, max_len: int) -> FieldBatch:
         "query_mask": query_mask,
         "delta_mask": delta_mask,
     }
+    if stats_vec is not None:
+        batch["stats_vec"] = stats_vec
+    return batch
 
 
 def augment_views(
@@ -119,6 +132,8 @@ def augment_views(
                     view[key] = tensor * keep_long
                 else:
                     view[key] = tensor * keep_float
+        if "stats_vec" in batch:
+            view["stats_vec"] = batch["stats_vec"]
         mask_token = torch.tensor(TYPE_TO_ID["MASK"], device=device)
         mask_flag = torch.rand((B, L), device=device) < mask_prob
         view["type_ids"] = torch.where(mask_flag, mask_token, view["type_ids"])

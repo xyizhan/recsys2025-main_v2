@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import optim
+import pickle
 
 try:
     from torch.amp import GradScaler as _GradScaler
@@ -67,6 +68,8 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--mask-prob", type=float, default=0.15)
     p.add_argument("--drop-prob", type=float, default=0.1)
     p.add_argument("--debug-logging", action="store_true")
+    p.add_argument("--stats-dim", type=int, default=0, help="Dimension of handcrafted stats features")
+    p.add_argument("--feat-path", type=str, default=None, help="Pickle file with client_id -> stats vector")
     return p
 
 
@@ -93,6 +96,8 @@ def train_model(
     mask_prob: float,
     drop_prob: float,
     debug_logging: bool,
+    stats_feature: dict[int, np.ndarray] | None,
+    stats_dim: int,
 ):
     ids = list(client_groups.keys())
     if len(ids) == 0:
@@ -112,7 +117,8 @@ def train_model(
             start = step_idx * batch_size
             batch_ids = ids[start : start + batch_size]
             seqs = [client_groups[cid] for cid in batch_ids]
-            batch = collate_sequences(seqs, max_len=max_seq_len)
+            feats = [stats_feature.get(int(cid), None) for cid in batch_ids] if stats_feature is not None else None
+            batch = collate_sequences(seqs, max_len=max_seq_len, stats_feat=feats, stats_dim=stats_dim)
             batch = _to_device(batch, device)
             v1, v2 = augment_views(batch, mask_prob=mask_prob, drop_prob=drop_prob)
             optimizer.zero_grad(set_to_none=True)
@@ -184,6 +190,8 @@ def generate_embeddings(
     guidance_weight: float,
     num_samples: int,
     debug_logging: bool,
+    stats_feature: dict[int, np.ndarray] | None,
+    stats_dim: int,
 ):
     model.eval()
     client_ids = relevant_client_ids.astype(np.int64)
@@ -194,7 +202,8 @@ def generate_embeddings(
     for step_idx, i in enumerate(range(0, total, batch_size)):
         batch_ids = client_ids[i : i + batch_size]
         seqs = [client_groups.get(int(cid), None) for cid in batch_ids]
-        batch = collate_sequences(seqs, max_len=max_seq_len)
+        feats = [stats_feature.get(int(cid), None) for cid in batch_ids] if stats_feature is not None else None
+        batch = collate_sequences(seqs, max_len=max_seq_len, stats_feat=feats, stats_dim=stats_dim)
         batch = _to_device(batch, device)
         out = model.sample_and_aggregate(
             batch,
@@ -264,6 +273,16 @@ def main(params):
                 100 * len(train_groups) / max(1, len(client_groups)),
             )
 
+    stats_feature = None
+    if params.stats_dim > 0:
+        if not params.feat_path:
+            raise ValueError("--feat-path is required when --stats-dim > 0")
+        feat_path = Path(params.feat_path)
+        if not feat_path.exists():
+            raise FileNotFoundError(f"Handcrafted feature file not found: {feat_path}")
+        with open(feat_path, "rb") as f:
+            stats_feature = pickle.load(f)
+        logger.info("Loaded handcrafted features for %d clients (dim=%d)", len(stats_feature), params.stats_dim)
     if params.device.lower() == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -287,6 +306,7 @@ def main(params):
         diffusion_hidden_dim=params.diffusion_hidden_dim,
         diffusion_time_embed_dim=params.diffusion_time_embed_dim,
         cfg_drop_prob=params.cfg_drop_prob,
+        stats_dim=params.stats_dim,
     )
     model.to(device)
     use_amp = device.type == "cuda" and not params.no_amp
@@ -312,6 +332,8 @@ def main(params):
         mask_prob=params.mask_prob,
         drop_prob=params.drop_prob,
         debug_logging=params.debug_logging,
+        stats_feature=stats_feature,
+        stats_dim=params.stats_dim,
     )
 
     logger.info("Generating embeddings via diffusion sampling...")
@@ -329,6 +351,8 @@ def main(params):
         guidance_weight=params.cfg_guidance_weight,
         num_samples=params.num_samples,
         debug_logging=params.debug_logging,
+        stats_feature=stats_feature,
+        stats_dim=params.stats_dim,
     )
 
     logger.info("Saving outputs to %s", str(embeddings_dir))
