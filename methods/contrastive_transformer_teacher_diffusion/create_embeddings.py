@@ -66,6 +66,7 @@ def get_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-samples", type=int, default=4)
     p.add_argument("--mask-prob", type=float, default=0.15)
     p.add_argument("--drop-prob", type=float, default=0.1)
+    p.add_argument("--debug-logging", action="store_true")
     return p
 
 
@@ -91,6 +92,7 @@ def train_model(
     ema_momentum: float,
     mask_prob: float,
     drop_prob: float,
+    debug_logging: bool,
 ):
     ids = list(client_groups.keys())
     if len(ids) == 0:
@@ -122,6 +124,20 @@ def train_model(
             teacher_target = model.teacher_embed(batch).to(base_hidden.dtype)
             diff_loss = model.diffusion_loss(base_hidden, teacher_target)
             loss = contrastive_weight * ctr_loss + diffusion_weight * diff_loss
+            if debug_logging and ((step_idx == 0) or ((step_idx + 1) % max(1, log_interval) == 0)):
+                delta_vals = batch["delta_times"]
+                logger.info(
+                    "debug TRAIN step=%d | type_shape=%s | delta_mean=%.4f delta_std=%.4f | "
+                    "s1_norm=%.4f s2_norm=%.4f | teacher_norm=%.4f | base_hidden_std=%.4f",
+                    step_idx + 1,
+                    tuple(batch["type_ids"].shape),
+                    float(delta_vals.mean().item()),
+                    float(delta_vals.std(unbiased=False).item()),
+                    float(torch.linalg.norm(s1["embed"], dim=-1).mean().item()),
+                    float(torch.linalg.norm(s2["embed"], dim=-1).mean().item()),
+                    float(torch.linalg.norm(teacher_target, dim=-1).mean().item()),
+                    float(base_hidden.float().std(unbiased=False).item()),
+                )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -167,6 +183,7 @@ def generate_embeddings(
     sampling_steps: int,
     guidance_weight: float,
     num_samples: int,
+    debug_logging: bool,
 ):
     model.eval()
     client_ids = relevant_client_ids.astype(np.int64)
@@ -186,6 +203,16 @@ def generate_embeddings(
             sampling_steps=sampling_steps,
             guidance_weight=guidance_weight,
         )
+        if debug_logging:
+            logger.info(
+                "debug INFER step=%d | batch=%d | embed_mean=%.5f embed_std=%.5f | min=%.5f max=%.5f",
+                step_idx + 1,
+                batch_ids.shape[0],
+                float(out.mean().item()),
+                float(out.std(unbiased=False).item()),
+                float(out.min().item()),
+                float(out.max().item()),
+            )
         embeddings[i : i + batch_ids.shape[0]] = out.detach().cpu().numpy().astype(np.float16)
         if (step_idx + 1) % max(1, log_interval) == 0 or (step_idx + 1) == steps:
             processed = min(i + batch_ids.shape[0], total)
@@ -284,6 +311,7 @@ def main(params):
         ema_momentum=params.ema_momentum,
         mask_prob=params.mask_prob,
         drop_prob=params.drop_prob,
+        debug_logging=params.debug_logging,
     )
 
     logger.info("Generating embeddings via diffusion sampling...")
@@ -300,6 +328,7 @@ def main(params):
         sampling_steps=params.sampling_steps,
         guidance_weight=params.cfg_guidance_weight,
         num_samples=params.num_samples,
+        debug_logging=params.debug_logging,
     )
 
     logger.info("Saving outputs to %s", str(embeddings_dir))

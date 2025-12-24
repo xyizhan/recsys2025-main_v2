@@ -44,7 +44,8 @@ python -m methods.contrastive_transformer_teacher_diffusion.create_embeddings \
   --cfg-guidance-weight 1.0 \
   --sampling-method ddim \
   --sampling-steps 20 \
-  --num-samples 4
+  --num-samples 4 \
+  --debug-logging
 
 echo "[Stage 2] Starting downstream training..."
 python -m training_pipeline.train \
