@@ -1,45 +1,48 @@
 # python -m methods.contrastive_transformer_psych.craft_features
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from sklearn.preprocessing import StandardScaler, QuantileTransformer
-from scipy import stats
+import argparse
 import warnings
 from pathlib import Path
-from multiprocessing import Pool, cpu_count
+
+import numpy as np
 from tqdm import tqdm
 import pickle
-import gc
 
 from data_utils.data_dir import DataDir
 from methods.contrastive_transformer_psych.data import (
-    EVENT_TYPES,
-    TYPE_TO_ID,
-    augment_views,
     build_client_sequences,
-    collate_sequences,
     load_events_df,
     compute_user_statistics,
-    STATS_DIM
 )
 
-warnings.filterwarnings('ignore')
-
-reference_time = datetime(2022, 11, 9)  
-start_date = datetime(2022, 6, 23)  
+warnings.filterwarnings("ignore")
 
 
-def main():
-    data_dir = DataDir(Path("/root/shared-nvme/data"))
+def get_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Pre-compute handcrafted user statistics.")
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        required=True,
+        help="Path to split_data directory used by DataDir",
+    )
+    parser.add_argument(
+        "--output-path",
+        type=str,
+        default="methods/contrastive_transformer_psych/user_stats_cache.pkl",
+        help="Where to save the serialized feature dictionary",
+    )
+    return parser
+
+
+def main(args: argparse.Namespace) -> None:
+    data_dir = DataDir(Path(args.data_dir))
     relevant_client_ids = np.load(data_dir.input_dir / "relevant_clients.npy")
-    print("Loading input events...")
+    print(f"[craft_features] Loading input events from {data_dir.base_dir}")
     dfs = load_events_df(data_dir=data_dir)
-    print("Building client sequences...")
+    print("[craft_features] Building client sequences...")
     client_groups = build_client_sequences(dfs=dfs, relevant_client_ids=relevant_client_ids)
 
-    cache_dir = "/root/shared-nvme/data/feature"
-    cache_path = Path(cache_dir) / 'user_stats_cache.pkl'
-    cache = {}
+    cache: dict[int, np.ndarray] = {}
     all_stats = []
     client_ids = []
 
@@ -50,9 +53,8 @@ def main():
         client_ids.append(client_id)
     all_stats = np.stack(all_stats, axis=0)
 
-    means = np.zeros(all_stats.shape[1])
-    stds = np.zeros(all_stats.shape[1])
-    
+    means = np.zeros(all_stats.shape[1], dtype=np.float64)
+    stds = np.zeros_like(means)
     for i in range(all_stats.shape[1]):
         feature = all_stats[:, i]
         median = np.median(feature)
@@ -61,17 +63,20 @@ def main():
             mad = np.std(feature) + 1e-8
         means[i] = median
         stds[i] = mad * 1.4826
-    
-    standardized_cache = {}
+
+    standardized_cache: dict[int, np.ndarray] = {}
     for client_id in tqdm(client_ids, desc="standardize features"):
         raw_stats = cache[client_id]
         standardized = (raw_stats - means) / (stds + 1e-8)
         standardized_cache[client_id] = standardized.astype(np.float32)
-    
-    with open(cache_path, 'wb') as f:
+
+    output_path = Path(args.output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "wb") as f:
         pickle.dump(standardized_cache, f)
-    print(f"预计算完成，缓存已保存到 {cache_path}")
+    print(f"[craft_features] Saved {len(standardized_cache)} user stats to {output_path}")
+
 
 if __name__ == "__main__":
-    main()
-    
+    parser = get_parser()
+    main(parser.parse_args())
