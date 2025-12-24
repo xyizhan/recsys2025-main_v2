@@ -7,7 +7,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import optim
-from torch.amp import GradScaler
+
+try:
+    from torch.amp import GradScaler as _GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler as _GradScaler
 
 from data_utils.data_dir import DataDir
 from methods.contrastive_transformer.model import info_nce_loss
@@ -93,7 +97,10 @@ def train_model(
         logger.warning("No clients available for training. Skipping.")
         return
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scaler = GradScaler(device_type=amp_device_type, enabled=use_amp)
+    try:
+        scaler = _GradScaler(device_type=amp_device_type, enabled=use_amp)
+    except TypeError:
+        scaler = _GradScaler(enabled=use_amp)
     steps_per_epoch = max(1, math.ceil(len(ids) / batch_size))
     for ep in range(epochs):
         np.random.shuffle(ids)
