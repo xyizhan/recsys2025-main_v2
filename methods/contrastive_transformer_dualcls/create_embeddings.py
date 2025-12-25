@@ -122,9 +122,9 @@ def build_order_prediction_batch(batch: dict[str, torch.Tensor]) -> tuple[dict[s
     if flip_mask.any():
         rev_idx = torch.arange(L - 1, -1, -1, device=device)
         for key, tensor in ordered.items():
-            if tensor.dim() == 3:
+            if tensor.dim() == 3 and tensor.size(1) == L:
                 ordered[key][flip_mask] = tensor[flip_mask][:, rev_idx, :]
-            else:
+            elif tensor.dim() == 2 and tensor.size(1) == L:
                 ordered[key][flip_mask] = tensor[flip_mask][:, rev_idx]
         labels[flip_mask] = 1
     return ordered, labels
