@@ -64,6 +64,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stats-version", type=str, default="concat", choices=["concat", "gate"])
     parser.add_argument("--stats-dim", type=int, default=STATS_DIM)
     parser.add_argument("--feat-path", type=str, required=True)
+    parser.add_argument("--disable-handcrafted", action="store_true")
+    parser.add_argument("--head-type", type=str, default="vae", choices=["vae", "mlp"])
     return parser
 
 
@@ -143,6 +145,7 @@ def train_encoder(
     enable_order_predict: bool,
     order_loss_weight: float,
     stats_feature: dict,
+    head_type: str,
 ):
     ids = list(client_groups.keys())
     if len(ids) == 0:
@@ -174,21 +177,25 @@ def train_encoder(
             feats = [stats_feature.get(int(cid), None) for cid in batch_ids]
             batch = collate_sequences(seqs, max_len=max_seq_len, stats_feat=feats)
             batch = {k: v.to(device) for k, v in batch.items()}
-            recon_target = build_recon_target(batch["type_ids"])
+            recon_target = build_recon_target(batch["type_ids"]) if head_type == "vae" else None
             v1, v2 = augment_views(batch)
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
                 out1 = model(v1, sample_latent=True)
                 out2 = model(v2, sample_latent=True)
                 ctr_loss = info_nce_loss(out1["embed"], out2["embed"], temperature=temperature)
-                recon_loss = 0.5 * (
-                    F.mse_loss(out1["vae_recon"], recon_target)
-                    + F.mse_loss(out2["vae_recon"], recon_target)
-                )
-                kl_loss = 0.5 * (
-                    SingleVAESummary.kl_divergence(out1["vae_mu"], out1["vae_logvar"])
-                    + SingleVAESummary.kl_divergence(out2["vae_mu"], out2["vae_logvar"])
-                )
+                if head_type == "vae":
+                    recon_loss = 0.5 * (
+                        F.mse_loss(out1["vae_recon"], recon_target)
+                        + F.mse_loss(out2["vae_recon"], recon_target)
+                    )
+                    kl_loss = 0.5 * (
+                        SingleVAESummary.kl_divergence(out1["vae_mu"], out1["vae_logvar"])
+                        + SingleVAESummary.kl_divergence(out2["vae_mu"], out2["vae_logvar"])
+                    )
+                else:
+                    recon_loss = torch.zeros(1, device=device)
+                    kl_loss = torch.zeros(1, device=device)
                 mask_loss = torch.zeros(1, device=device)
                 if enable_mask_predict:
                     masked_batch, mask_labels = build_mask_prediction_batch(batch, mask_prob)
@@ -203,11 +210,9 @@ def train_encoder(
                     order_batch, order_labels = build_order_prediction_batch(batch)
                     order_logits = model.classify_order(order_batch)
                     order_loss = F.cross_entropy(order_logits, order_labels)
-                loss = (
-                    contrastive_weight * ctr_loss
-                    + recon_weight * recon_loss
-                    + kl_weight * kl_loss
-                )
+                loss = contrastive_weight * ctr_loss
+                if head_type == "vae":
+                    loss = loss + recon_weight * recon_loss + kl_weight * kl_loss
                 if enable_mask_predict:
                     loss = loss + mask_loss_weight * mask_loss
                 if enable_order_predict:
@@ -341,6 +346,8 @@ def main(params):
         stats_dim=params.stats_dim,
         recon_dim=len(EVENT_TYPES),
         stats_version=params.stats_version,
+        use_handcrafted=not params.disable_handcrafted,
+        head_type=params.head_type,
     )
     model.to(device)
     use_amp = device.type == "cuda" and not params.no_amp
@@ -370,6 +377,7 @@ def main(params):
         enable_order_predict=params.enable_order_predict,
         order_loss_weight=params.order_loss_weight,
         stats_feature=stats_feature,
+        head_type=params.head_type,
     )
     logger.info("Generating embeddings for relevant clients...")
     client_ids, embeddings = generate_embeddings(

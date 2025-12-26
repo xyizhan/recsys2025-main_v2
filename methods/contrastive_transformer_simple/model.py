@@ -49,7 +49,7 @@ class SingleVAESummary(nn.Module):
 
 
 class SingleVAEPsychTransformer(nn.Module):
-    """Contrastive transformer encoder with one VAE head."""
+    """Contrastive transformer encoder with configurable VAE/MLP head."""
 
     def __init__(
         self,
@@ -68,17 +68,24 @@ class SingleVAEPsychTransformer(nn.Module):
         stats_dim: int = 46,
         recon_dim: int = 5,
         stats_version: str = "concat",
+        use_handcrafted: bool = True,
+        head_type: str = "vae",
     ) -> None:
         super().__init__()
         self.d_model = d_model
         self.latent_dim = latent_dim
+        self.use_handcrafted = use_handcrafted
+        self.head_type = head_type
         self.emb_type = nn.Embedding(type_buckets, d_model)
         self.emb_sku = nn.Embedding(sku_buckets, d_model)
         self.emb_cat = nn.Embedding(cat_buckets, d_model)
         self.emb_url = nn.Embedding(url_buckets, d_model)
         self.emb_price = nn.Embedding(price_buckets, d_model)
         self.query_proj = nn.Linear(16, d_model)
-        self.stats_proj = nn.Sequential(nn.BatchNorm1d(stats_dim), nn.Linear(stats_dim, d_model))
+        if self.use_handcrafted:
+            self.stats_proj = nn.Sequential(nn.BatchNorm1d(stats_dim), nn.Linear(stats_dim, d_model))
+        else:
+            self.stats_proj = None
         self.cls = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.pos = PositionalEncoding(d_model=d_model)
         self.dropout = nn.Dropout(dropout)
@@ -95,16 +102,29 @@ class SingleVAEPsychTransformer(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         self.stats_version = stats_version
-        if stats_version == "concat":
+        if self.use_handcrafted and stats_version == "concat":
             self.h_fusion = nn.Sequential(
                 nn.LayerNorm(d_model * 2),
                 nn.Linear(d_model * 2, d_model),
                 nn.GELU(),
             )
-        elif stats_version == "gate":
+        elif self.use_handcrafted and stats_version == "gate":
             self.stats_to_film = nn.Linear(d_model, d_model * 2)
-        self.vae = SingleVAESummary(input_dim=d_model, latent_dim=latent_dim, recon_dim=recon_dim, hidden_dim=max(d_model, 256))
-        self.latent_to_embed = nn.Linear(latent_dim, embed_dim)
+        if self.head_type == "vae":
+            self.vae = SingleVAESummary(
+                input_dim=d_model, latent_dim=latent_dim, recon_dim=recon_dim, hidden_dim=max(d_model, 256)
+            )
+            self.latent_to_embed = nn.Linear(latent_dim, embed_dim)
+            self.mlp_head = None
+        else:
+            self.vae = None
+            self.latent_to_embed = None
+            self.mlp_head = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, max(d_model, 256)),
+                nn.GELU(),
+                nn.Linear(max(d_model, 256), embed_dim),
+            )
         self.mask_predictor = nn.Linear(d_model, type_buckets)
         order_hidden = max(64, d_model // 2)
         self.order_classifier = nn.Sequential(
@@ -136,11 +156,13 @@ class SingleVAEPsychTransformer(nn.Module):
         seq = self.encoder(x)
         if return_sequence:
             return seq
-        stats_emb = self.stats_proj(batch["stats_vec"])
+        stats_emb = None
+        if self.use_handcrafted:
+            stats_emb = self.stats_proj(batch["stats_vec"])
         h = seq[:, 0, :]
-        if self.stats_version == "concat":
+        if self.use_handcrafted and self.stats_version == "concat":
             h = self.h_fusion(torch.cat([h, stats_emb], dim=-1))
-        elif self.stats_version == "gate":
+        elif self.use_handcrafted and self.stats_version == "gate":
             gamma_beta = self.stats_to_film(stats_emb)
             gamma, beta = gamma_beta.chunk(2, dim=-1)
             gamma = torch.sigmoid(gamma)
@@ -150,16 +172,20 @@ class SingleVAEPsychTransformer(nn.Module):
 
     def forward(self, batch: dict[str, torch.Tensor], sample_latent: bool = True) -> dict[str, torch.Tensor]:
         h, _ = self.encode_events(batch)
-        vae_out = self.vae(h, sample_latent=sample_latent)
-        embed = self.latent_to_embed(vae_out["mu"])
-        embed = F.normalize(embed, dim=-1)
-        return {
-            "embed": embed,
-            "vae_latent": vae_out["latent"],
-            "vae_mu": vae_out["mu"],
-            "vae_logvar": vae_out["logvar"],
-            "vae_recon": vae_out["recon"],
-        }
+        if self.head_type == "vae":
+            vae_out = self.vae(h, sample_latent=sample_latent)
+            embed = self.latent_to_embed(vae_out["mu"])
+            embed = F.normalize(embed, dim=-1)
+            return {
+                "embed": embed,
+                "vae_latent": vae_out["latent"],
+                "vae_mu": vae_out["mu"],
+                "vae_logvar": vae_out["logvar"],
+                "vae_recon": vae_out["recon"],
+            }
+        proj = self.mlp_head(h)
+        embed = F.normalize(proj, dim=-1)
+        return {"embed": embed}
 
     @staticmethod
     def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
