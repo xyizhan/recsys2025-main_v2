@@ -65,7 +65,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stats-dim", type=int, default=STATS_DIM)
     parser.add_argument("--feat-path", type=str, required=True)
     parser.add_argument("--disable-handcrafted", action="store_true")
-    parser.add_argument("--head-type", type=str, default="vae", choices=["vae", "mlp"])
+    parser.add_argument("--head-type", type=str, default="vae", choices=["vae", "mlp", "cls"])
     return parser
 
 

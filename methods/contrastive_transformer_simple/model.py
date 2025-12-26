@@ -110,13 +110,15 @@ class SingleVAEPsychTransformer(nn.Module):
             )
         elif self.use_handcrafted and stats_version == "gate":
             self.stats_to_film = nn.Linear(d_model, d_model * 2)
+        if self.head_type not in {"vae", "mlp", "cls"}:
+            raise ValueError(f"Unsupported head_type={self.head_type}")
         if self.head_type == "vae":
             self.vae = SingleVAESummary(
                 input_dim=d_model, latent_dim=latent_dim, recon_dim=recon_dim, hidden_dim=max(d_model, 256)
             )
             self.latent_to_embed = nn.Linear(latent_dim, embed_dim)
             self.mlp_head = None
-        else:
+        elif self.head_type == "mlp":
             self.vae = None
             self.latent_to_embed = None
             self.mlp_head = nn.Sequential(
@@ -125,6 +127,10 @@ class SingleVAEPsychTransformer(nn.Module):
                 nn.GELU(),
                 nn.Linear(max(d_model, 256), embed_dim),
             )
+        else:
+            self.vae = None
+            self.latent_to_embed = None
+            self.mlp_head = None
         self.mask_predictor = nn.Linear(d_model, type_buckets)
         order_hidden = max(64, d_model // 2)
         self.order_classifier = nn.Sequential(
@@ -183,9 +189,12 @@ class SingleVAEPsychTransformer(nn.Module):
                 "vae_logvar": vae_out["logvar"],
                 "vae_recon": vae_out["recon"],
             }
-        proj = self.mlp_head(h)
-        embed = F.normalize(proj, dim=-1)
-        return {"embed": embed}
+        if self.head_type == "mlp":
+            proj = self.mlp_head(h)
+            embed = F.normalize(proj, dim=-1)
+            return {"embed": embed}
+        # CLS head: use Transformer CLS token directly without additional normalization
+        return {"embed": h}
 
     @staticmethod
     def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
