@@ -21,7 +21,7 @@ from methods.contrastive_transformer_psych.data import (
     load_events_df,
     STATS_DIM,
 )
-from methods.contrastive_transformer_psych_simple.model import SingleVAEPsychTransformer, SingleVAESummary
+from methods.contrastive_transformer_simple.model import SingleVAEPsychTransformer, SingleVAESummary
 
 
 logging.basicConfig()
