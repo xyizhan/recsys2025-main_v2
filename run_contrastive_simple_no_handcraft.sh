@@ -11,7 +11,7 @@ log_file="$log_dir/contrastive_simple_no_handcraft_${timestamp}.log"
 
 echo "===== Stage 1: 单VAE去手工特征消融（仅生成表征） ====="
 echo "Logs: $log_file"
-nohup bash <<'EOF' > "$log_file" 2>&1 &
+nohup bash <<EOF > "$log_file" 2>&1 &
 set -euo pipefail
 echo "[Stage 1] Generating embeddings without handcrafted features..."
 python -m methods.contrastive_transformer_simple.create_embeddings \

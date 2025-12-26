@@ -11,7 +11,7 @@ log_file="$log_dir/contrastive_simple_no_aux_${timestamp}.log"
 
 echo "===== Stage 1: 去掉 mask/order 辅助任务（仅生成表征） ====="
 echo "Logs: $log_file"
-nohup bash <<'EOF' > "$log_file" 2>&1 &
+nohup bash <<EOF > "$log_file" 2>&1 &
 set -euo pipefail
 echo "[Stage 1] Generating embeddings without auxiliary tasks..."
 python -m methods.contrastive_transformer_simple.create_embeddings \

@@ -11,7 +11,7 @@ log_file="$log_dir/contrastive_simple_no_aux_downstream_${timestamp}.log"
 
 echo "===== Stage 2: 去掉 mask/order 辅助任务下游训练 ====="
 echo "Logs: $log_file"
-nohup bash <<'EOF' > "$log_file" 2>&1 &
+nohup bash <<EOF > "$log_file" 2>&1 &
 set -euo pipefail
 python -m training_pipeline.train \
   --data-dir ../autodl-tmp/recsys_new \

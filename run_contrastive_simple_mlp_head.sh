@@ -11,7 +11,7 @@ log_file="$log_dir/contrastive_simple_mlp_${timestamp}.log"
 
 echo "===== Stage 1: MLP 头消融（仅生成表征） ====="
 echo "Logs: $log_file"
-nohup bash <<'EOF' > "$log_file" 2>&1 &
+nohup bash <<EOF > "$log_file" 2>&1 &
 set -euo pipefail
 echo "[Stage 1] Generating embeddings with deterministic MLP head..."
 python -m methods.contrastive_transformer_simple.create_embeddings \
