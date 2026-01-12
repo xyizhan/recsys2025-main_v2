@@ -34,7 +34,7 @@
 | --- | --- | --- |
 | `contrastive_transformer` | Transformer Encoder + SimCLR 投影 | InfoNCE |
 | `contrastive_transformer_vae` | 共享 Transformer 表征 + 行为 VAE 重构分支 | InfoNCE + 行为重构 MSE + KL |
-| `contrastive_transformer_psych` | 行为 VAE + 马斯洛层级心理 VAE 双分支，支持层次依赖门控与多路融合 | InfoNCE + 行为/心理重构 + 双 KL + 层次约束 |
+| `contrastive_transformer_psych` | 行为 VAE + 层次化 VAE 双分支，支持层次依赖门控与多路融合 | InfoNCE + 行为/意图重构 + 双 KL + 层次约束 |
 
 所有模型均复用 `methods/contrastive_transformer/data.py` 中的数据处理、增广与 `collate_sequences`，输入输出接口一致：生成 `client_ids.npy (int64)` 与 `embeddings.npy (float16)`，顺序一一对应。
 
@@ -71,6 +71,5 @@ bash run_contrastive_psych_embedding.sh
    ```
 3. 若需要离线评估，可在 `training_pipeline/` 中运行公开任务训练脚本并比较 AUROC/Novelty/Diversity。
 
-## 贡献说明
-- 贡献建议参考 `AGENTS.md`（贡献者指南）。核心原则：保持输入输出契约不变、对齐日志/目录命名、在 PR 描述中附运行命令或日志。
+## 其他说明
 - 新增方法请放置在 `methods/` 下独立子目录，并重用 `data.py` 数据接口以保证 pipeline 兼容。
